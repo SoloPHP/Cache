@@ -1,0 +1,8 @@
+parameters:
+    level: max
+    paths:
+        - src
+    reportUnmatchedIgnoredErrors: false
+    ignoreErrors:
+        # Ignore unnecessary curly braces in cache file paths
+        - '#Unnecessary curly braces#'
