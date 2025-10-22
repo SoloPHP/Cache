@@ -3,7 +3,6 @@
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
 [![License](https://img.shields.io/packagist/l/solophp/cache.svg)](https://github.com/solophp/cache/blob/main/LICENSE)
 [![PHP Version](https://img.shields.io/packagist/php-v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
-[![Tests](https://img.shields.io/github/actions/workflow/status/solophp/cache/tests.yml?label=tests)](https://github.com/solophp/cache/actions)
 
 A flexible, PSR-16 compliant cache library with pluggable adapters for PHP 8.1+.
 
