@@ -251,6 +251,18 @@ class FileAdapterTest extends TestCase
         $this->adapter->get('key@#$%');
     }
 
+    public function testColonSeparatorInKey(): void
+    {
+        $this->assertTrue($this->adapter->set('user:123:profile', 'data'));
+        $this->assertEquals('data', $this->adapter->get('user:123:profile'));
+    }
+
+    public function testNestedColonSeparatorInKey(): void
+    {
+        $this->assertTrue($this->adapter->set('app:cache:user:session:abc123', 'session_data'));
+        $this->assertEquals('session_data', $this->adapter->get('app:cache:user:session:abc123'));
+    }
+
     public function testComplexDataTypes(): void
     {
         $data = [
@@ -322,5 +334,177 @@ class FileAdapterTest extends TestCase
         // Should not throw exception in MODE_FAIL
         $result = $adapter->set('key', 'value');
         $this->assertFalse($result);
+    }
+
+    public function testGetWithCorruptedCacheData(): void
+    {
+        // Create a corrupted cache file
+        $key = 'corrupted';
+        $filePath = $this->cacheDirectory . '/' . md5($key) . '.cache';
+        file_put_contents($filePath, 'invalid serialized data');
+
+        $result = $this->adapter->get($key, 'default');
+        $this->assertEquals('default', $result);
+
+        // File should be deleted
+        $this->assertFileDoesNotExist($filePath);
+    }
+
+    public function testGetWithInvalidCacheStructure(): void
+    {
+        // Create a cache file with invalid structure (missing expires_at)
+        $key = 'invalid_structure';
+        $filePath = $this->cacheDirectory . '/' . md5($key) . '.cache';
+        file_put_contents($filePath, serialize(['value' => 'test']));
+
+        $result = $this->adapter->get($key, 'default');
+        $this->assertEquals('default', $result);
+    }
+
+    public function testGetMultipleWithEmptyArray(): void
+    {
+        $result = $this->adapter->getMultiple([]);
+        $this->assertEquals([], $result);
+    }
+
+    public function testGetMultipleWithIterator(): void
+    {
+        $this->adapter->set('iter1', 'value1');
+        $this->adapter->set('iter2', 'value2');
+
+        $iterator = new \ArrayIterator(['iter1', 'iter2']);
+        $result = $this->adapter->getMultiple($iterator);
+
+        $expected = ['iter1' => 'value1', 'iter2' => 'value2'];
+        $this->assertEquals($expected, $result);
+    }
+
+    public function testSetMultipleWithEmptyArray(): void
+    {
+        $result = $this->adapter->setMultiple([]);
+        $this->assertTrue($result);
+    }
+
+    public function testSetMultipleWithIterator(): void
+    {
+        $iterator = new \ArrayIterator(['iter_key1' => 'value1', 'iter_key2' => 'value2']);
+        $result = $this->adapter->setMultiple($iterator);
+
+        $this->assertTrue($result);
+        $this->assertEquals('value1', $this->adapter->get('iter_key1'));
+        $this->assertEquals('value2', $this->adapter->get('iter_key2'));
+    }
+
+    public function testSetMultipleWithNonStringKeyThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Cache key must be a string');
+
+        $this->adapter->setMultiple([0 => 'value1', 1 => 'value2']);
+    }
+
+    public function testSetMultipleInModeFailReturnsFalseOnError(): void
+    {
+        $adapter = new FileAdapter($this->cacheDirectory, FileAdapter::MODE_FAIL);
+
+        // Make directory read-only to trigger write failure
+        chmod($this->cacheDirectory, 0444);
+
+        $result = $adapter->setMultiple(['key1' => 'value1', 'key2' => 'value2']);
+        $this->assertFalse($result);
+    }
+
+    public function testDeleteMultipleWithEmptyArray(): void
+    {
+        $result = $this->adapter->deleteMultiple([]);
+        $this->assertTrue($result);
+    }
+
+    public function testDeleteMultipleWithIterator(): void
+    {
+        $this->adapter->set('del_iter1', 'value1');
+        $this->adapter->set('del_iter2', 'value2');
+
+        $iterator = new \ArrayIterator(['del_iter1', 'del_iter2']);
+        $result = $this->adapter->deleteMultiple($iterator);
+
+        $this->assertTrue($result);
+        $this->assertNull($this->adapter->get('del_iter1'));
+        $this->assertNull($this->adapter->get('del_iter2'));
+    }
+
+    public function testGetMultipleWithNonStringKeyThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Cache key must be a string');
+
+        $this->adapter->getMultiple([123, 456]);
+    }
+
+    public function testDeleteMultipleWithNonStringKeyThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Cache key must be a string');
+
+        $this->adapter->deleteMultiple([123, 456]);
+    }
+
+    public function testHasWithCorruptedCacheData(): void
+    {
+        $key = 'has_corrupted';
+        $filePath = $this->cacheDirectory . '/' . md5($key) . '.cache';
+        file_put_contents($filePath, 'invalid data');
+
+        $this->assertFalse($this->adapter->has($key));
+        $this->assertFileDoesNotExist($filePath);
+    }
+
+    public function testSetWithZeroTtl(): void
+    {
+        $result = $this->adapter->set('zero_ttl', 'value', 0);
+        $this->assertTrue($result);
+        $this->assertNull($this->adapter->get('zero_ttl'));
+    }
+
+    public function testValidKeyWithAllAllowedCharacters(): void
+    {
+        $key = 'aA0_.:zZ9';
+        $this->assertTrue($this->adapter->set($key, 'value'));
+        $this->assertEquals('value', $this->adapter->get($key));
+    }
+
+    public function testConstructorThrowsExceptionForNonWritableDirectory(): void
+    {
+        $readOnlyDir = sys_get_temp_dir() . '/readonly_cache_' . uniqid();
+        mkdir($readOnlyDir, 0555);
+
+        try {
+            $this->expectException(CacheException::class);
+            $this->expectExceptionMessage('Cache directory is not writable');
+            new FileAdapter($readOnlyDir);
+        } finally {
+            chmod($readOnlyDir, 0755);
+            rmdir($readOnlyDir);
+        }
+    }
+
+    public function testGetWithUnreadableFile(): void
+    {
+        $key = 'unreadable';
+        $this->adapter->set($key, 'value');
+
+        $filePath = $this->cacheDirectory . '/' . md5($key) . '.cache';
+
+        // Make file unreadable
+        chmod($filePath, 0000);
+
+        $result = $this->adapter->get($key, 'default');
+
+        // Restore permissions for cleanup (file may have been deleted)
+        if (file_exists($filePath)) {
+            chmod($filePath, 0644);
+        }
+
+        $this->assertEquals('default', $result);
     }
 }

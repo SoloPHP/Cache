@@ -10,7 +10,7 @@ use Solo\Cache\Exception\InvalidArgumentException;
 
 class FileAdapter implements CacheAdapterInterface
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.]+$/';
+    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:]+$/';
 
     // Error handling modes
     public const MODE_THROW = 0;  // Throw exceptions on errors
@@ -106,11 +106,7 @@ class FileAdapter implements CacheAdapterInterface
 
     public function clear(): bool
     {
-        $files = glob($this->cacheDirectory . '/*');
-
-        if ($files === false) {
-            return false;
-        }
+        $files = glob($this->cacheDirectory . '/*') ?: [];
 
         $success = true;
 
@@ -146,7 +142,6 @@ class FileAdapter implements CacheAdapterInterface
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
         $valueArray = is_array($values) ? $values : iterator_to_array($values);
-        $this->validateIterable($valueArray);
 
         if (empty($valueArray)) {
             return true;
@@ -158,14 +153,7 @@ class FileAdapter implements CacheAdapterInterface
                 throw new InvalidArgumentException('Cache key must be a string');
             }
 
-            try {
-                $success = $this->set($key, $value, $ttl) && $success;
-            } catch (CacheException $e) {
-                if ($this->mode === self::MODE_THROW) {
-                    throw $e;
-                }
-                $success = false;
-            }
+            $success = $this->set($key, $value, $ttl) && $success;
         }
 
         return $success;
@@ -270,7 +258,7 @@ class FileAdapter implements CacheAdapterInterface
         if (!preg_match(self::KEY_PATTERN, $key)) {
             throw new InvalidArgumentException(
                 'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, and dots are allowed.'
+                'Only alphanumeric characters, underscores, dots, and colons are allowed.'
             );
         }
     }
@@ -280,10 +268,6 @@ class FileAdapter implements CacheAdapterInterface
      */
     private function validateKeys(iterable $keys): void
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgumentException('Keys must be iterable');
-        }
-
         foreach ($keys as $key) {
             if (!is_string($key)) {
                 throw new InvalidArgumentException('Cache key must be a string');
@@ -293,15 +277,6 @@ class FileAdapter implements CacheAdapterInterface
         }
     }
 
-    /**
-     * @param iterable<mixed> $values
-     */
-    private function validateIterable(iterable $values): void
-    {
-        if (!is_iterable($values)) {
-            throw new InvalidArgumentException('Values must be iterable');
-        }
-    }
 
     private function calculateExpiration(null|int|DateInterval $ttl): ?int
     {
@@ -328,20 +303,12 @@ class FileAdapter implements CacheAdapterInterface
      */
     public function gc(): int
     {
-        $files = glob($this->cacheDirectory . '/*.cache');
-
-        if ($files === false) {
-            return 0;
-        }
+        $files = glob($this->cacheDirectory . '/*.cache') ?: [];
 
         $deleted = 0;
         $now = time();
 
         foreach ($files as $file) {
-            if (!is_file($file)) {
-                continue;
-            }
-
             $data = $this->loadCacheData($file);
 
             if ($data === null || ($data['expires_at'] !== null && $data['expires_at'] < $now)) {

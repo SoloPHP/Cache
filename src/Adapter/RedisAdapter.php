@@ -11,7 +11,7 @@ use Solo\Cache\Exception\InvalidArgumentException;
 
 class RedisAdapter implements CacheAdapterInterface
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.]+$/';
+    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:]+$/';
     private const KEY_PREFIX = 'cache:';
 
     // Error handling modes
@@ -155,7 +155,6 @@ class RedisAdapter implements CacheAdapterInterface
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
         $valueArray = is_array($values) ? $values : iterator_to_array($values);
-        $this->validateIterable($valueArray);
 
         if (empty($valueArray)) {
             return true;
@@ -254,7 +253,7 @@ class RedisAdapter implements CacheAdapterInterface
         if (!preg_match(self::KEY_PATTERN, $key)) {
             throw new InvalidArgumentException(
                 'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, and dots are allowed.'
+                'Only alphanumeric characters, underscores, dots, and colons are allowed.'
             );
         }
     }
@@ -264,26 +263,12 @@ class RedisAdapter implements CacheAdapterInterface
      */
     private function validateKeys(iterable $keys): void
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgumentException('Keys must be iterable');
-        }
-
         foreach ($keys as $key) {
             if (!is_string($key)) {
                 throw new InvalidArgumentException('Cache key must be a string');
             }
 
             $this->validateKey($key);
-        }
-    }
-
-    /**
-     * @param iterable<mixed> $values
-     */
-    private function validateIterable(iterable $values): void
-    {
-        if (!is_iterable($values)) {
-            throw new InvalidArgumentException('Values must be iterable');
         }
     }
 

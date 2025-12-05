@@ -58,7 +58,7 @@ interface CacheAdapterInterface
     /**
      * Persists a set of key => value pairs in the cache, with an optional TTL.
      *
-     * @param iterable<string, mixed> $values A list of key => value pairs for a multiple-set operation.
+     * @param iterable<int|string, mixed> $values A list of key => value pairs for a multiple-set operation.
      * @param null|int|DateInterval $ttl Optional. The TTL value of this item.
      * @return bool True on success and false on failure.
      * @throws \Psr\SimpleCache\InvalidArgumentException

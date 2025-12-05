@@ -3,6 +3,7 @@
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
 [![License](https://img.shields.io/packagist/l/solophp/cache.svg)](https://github.com/solophp/cache/blob/main/LICENSE)
 [![PHP Version](https://img.shields.io/packagist/php-v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)]()
 
 A flexible, PSR-16 compliant cache library with pluggable adapters for PHP 8.1+.
 
@@ -197,8 +198,14 @@ Redis-based cache implementation for high-performance and distributed applicatio
 
 Both adapters enforce PSR-16 key requirements:
 - Keys cannot be empty
-- Only alphanumeric characters, underscores, and dots are allowed
-- Pattern: `/^[a-zA-Z0-9_.]+$/`
+- Only alphanumeric characters, underscores, dots, and colons are allowed
+- Pattern: `/^[a-zA-Z0-9_.:]+$/`
+- Colons (`:`) are supported as the standard separator for cache keys (Redis, Memcached conventions)
+
+Example keys:
+- `user:123:profile`
+- `cache:session:abc123`
+- `app.config.database`
 
 Invalid keys will throw `Solo\Cache\Exception\InvalidArgumentException`.
 

@@ -41,7 +41,7 @@ class Cache implements CacheInterface
     }
 
     /**
-     * @param iterable<string, mixed> $values
+     * @param iterable<int|string, mixed> $values
      */
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
