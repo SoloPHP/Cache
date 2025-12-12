@@ -10,7 +10,7 @@ use Solo\Cache\Exception\InvalidArgumentException;
 
 class FileAdapter implements CacheAdapterInterface
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:]+$/';
+    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:-]+$/';
 
     // Error handling modes
     public const MODE_THROW = 0;  // Throw exceptions on errors
@@ -258,7 +258,7 @@ class FileAdapter implements CacheAdapterInterface
         if (!preg_match(self::KEY_PATTERN, $key)) {
             throw new InvalidArgumentException(
                 'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, dots, and colons are allowed.'
+                'Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed.'
             );
         }
     }

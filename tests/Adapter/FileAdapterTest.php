@@ -468,9 +468,16 @@ class FileAdapterTest extends TestCase
 
     public function testValidKeyWithAllAllowedCharacters(): void
     {
-        $key = 'aA0_.:zZ9';
+        $key = 'aA0_.:-zZ9';
         $this->assertTrue($this->adapter->set($key, 'value'));
         $this->assertEquals('value', $this->adapter->get($key));
+    }
+
+    public function testUuidKey(): void
+    {
+        $uuid = '550e8400-e29b-41d4-a716-446655440000';
+        $this->assertTrue($this->adapter->set($uuid, 'uuid_value'));
+        $this->assertEquals('uuid_value', $this->adapter->get($uuid));
     }
 
     public function testConstructorThrowsExceptionForNonWritableDirectory(): void

@@ -686,8 +686,21 @@ class RedisAdapterTest extends TestCase
 
         $adapter = new RedisAdapter($redis);
 
-        $key = 'aA0_.:zZ9';
+        $key = 'aA0_.:-zZ9';
         $this->assertTrue($adapter->set($key, 'value'));
         $this->assertEquals('value', $adapter->get($key));
+    }
+
+    public function testUuidKey(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('set')->willReturn(true);
+        $redis->method('get')->willReturn('uuid_value');
+
+        $adapter = new RedisAdapter($redis);
+
+        $uuid = '550e8400-e29b-41d4-a716-446655440000';
+        $this->assertTrue($adapter->set($uuid, 'uuid_value'));
+        $this->assertEquals('uuid_value', $adapter->get($uuid));
     }
 }

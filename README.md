@@ -198,14 +198,16 @@ Redis-based cache implementation for high-performance and distributed applicatio
 
 Both adapters enforce PSR-16 key requirements:
 - Keys cannot be empty
-- Only alphanumeric characters, underscores, dots, and colons are allowed
-- Pattern: `/^[a-zA-Z0-9_.:]+$/`
+- Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed
+- Pattern: `/^[a-zA-Z0-9_.:-]+$/`
 - Colons (`:`) are supported as the standard separator for cache keys (Redis, Memcached conventions)
+- Hyphens (`-`) are supported for UUID keys
 
 Example keys:
 - `user:123:profile`
 - `cache:session:abc123`
 - `app.config.database`
+- `550e8400-e29b-41d4-a716-446655440000`
 
 Invalid keys will throw `Solo\Cache\Exception\InvalidArgumentException`.
 

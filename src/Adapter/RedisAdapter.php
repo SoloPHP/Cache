@@ -11,7 +11,7 @@ use Solo\Cache\Exception\InvalidArgumentException;
 
 class RedisAdapter implements CacheAdapterInterface
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:]+$/';
+    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:-]+$/';
     private const KEY_PREFIX = 'cache:';
 
     // Error handling modes
@@ -253,7 +253,7 @@ class RedisAdapter implements CacheAdapterInterface
         if (!preg_match(self::KEY_PATTERN, $key)) {
             throw new InvalidArgumentException(
                 'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, dots, and colons are allowed.'
+                'Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed.'
             );
         }
     }
