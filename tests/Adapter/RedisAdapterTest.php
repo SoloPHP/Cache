@@ -25,7 +25,6 @@ class RedisAdapterTest extends TestCase
     {
         $redis = $this->createMock(Redis::class);
         $redis->method('isConnected')->willReturn(true);
-        $redis->method('getOption')->willReturn(Redis::SERIALIZER_PHP);
         return $redis;
     }
 
@@ -44,22 +43,30 @@ class RedisAdapterTest extends TestCase
     {
         $redis = $this->createMock(Redis::class);
         $redis->method('isConnected')->willReturn(false);
-        $redis->method('getOption')->willReturn(Redis::SERIALIZER_PHP);
 
         $adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
         $this->assertInstanceOf(RedisAdapter::class, $adapter);
     }
 
-    public function testConstructorSetsSerializerOption(): void
+    public function testConstructorDisablesBuiltInSerializer(): void
     {
         $redis = $this->createMock(Redis::class);
         $redis->method('isConnected')->willReturn(true);
-        $redis->method('getOption')->willReturn(Redis::SERIALIZER_NONE);
         $redis->expects($this->once())
             ->method('setOption')
-            ->with(Redis::OPT_SERIALIZER, Redis::SERIALIZER_PHP);
+            ->with(Redis::OPT_SERIALIZER, Redis::SERIALIZER_NONE);
 
         new RedisAdapter($redis);
+    }
+
+    public function testConstructorDoesNotSetSerializerWhenNotConnected(): void
+    {
+        $redis = $this->createMock(Redis::class);
+        $redis->method('isConnected')->willReturn(false);
+        $redis->expects($this->never())
+            ->method('setOption');
+
+        new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
     }
 
     public function testSetAndGet(): void
@@ -67,12 +74,12 @@ class RedisAdapterTest extends TestCase
         $redis = $this->createConnectedRedisMock();
         $redis->expects($this->once())
             ->method('set')
-            ->with('cache:key', 'value')
+            ->with('cache:key', serialize('value'))
             ->willReturn(true);
         $redis->expects($this->once())
             ->method('get')
             ->with('cache:key')
-            ->willReturn('value');
+            ->willReturn(serialize('value'));
 
         $adapter = new RedisAdapter($redis);
 
@@ -90,12 +97,22 @@ class RedisAdapterTest extends TestCase
         $this->assertEquals('default', $adapter->get('nonexistent', 'default'));
     }
 
+    public function testGetWithFalseValue(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('get')->willReturn(serialize(false));
+
+        $adapter = new RedisAdapter($redis);
+
+        $this->assertFalse($adapter->get('key', 'default'));
+    }
+
     public function testSetWithTtl(): void
     {
         $redis = $this->createConnectedRedisMock();
         $redis->expects($this->once())
             ->method('setex')
-            ->with('cache:key', 3600, 'value')
+            ->with('cache:key', 3600, serialize('value'))
             ->willReturn(true);
 
         $adapter = new RedisAdapter($redis);
@@ -165,13 +182,37 @@ class RedisAdapterTest extends TestCase
         $this->assertTrue($adapter->delete('nonexistent'));
     }
 
+    public function testDeleteThrowsExceptionInModeThrow(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('del')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_THROW);
+
+        $this->expectException(CacheException::class);
+        $adapter->delete('key');
+    }
+
+    public function testDeleteReturnsFalseInModeFail(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('del')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
+
+        $this->assertFalse($adapter->delete('key'));
+    }
+
     public function testClear(): void
     {
         $redis = $this->createConnectedRedisMock();
         $redis->expects($this->once())
-            ->method('keys')
-            ->with('cache:*')
-            ->willReturn(['cache:key1', 'cache:key2']);
+            ->method('scan')
+            ->willReturnCallback(function (&$iterator, $pattern, $count) {
+                $this->assertEquals('cache:*', $pattern);
+                $iterator = 0;
+                return ['cache:key1', 'cache:key2'];
+            });
         $redis->expects($this->once())
             ->method('del')
             ->with(['cache:key1', 'cache:key2'])
@@ -185,11 +226,58 @@ class RedisAdapterTest extends TestCase
     public function testClearWithNoKeys(): void
     {
         $redis = $this->createConnectedRedisMock();
-        $redis->method('keys')->willReturn([]);
+        $redis->method('scan')
+            ->willReturnCallback(function (&$iterator) {
+                $iterator = 0;
+                return false;
+            });
 
         $adapter = new RedisAdapter($redis);
 
         $this->assertTrue($adapter->clear());
+    }
+
+    public function testClearWithMultipleScanIterations(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $callCount = 0;
+        $redis->method('scan')
+            ->willReturnCallback(function (&$iterator) use (&$callCount) {
+                $callCount++;
+                if ($callCount === 1) {
+                    $iterator = 42; // More keys to scan
+                    return ['cache:key1'];
+                }
+                $iterator = 0; // Done
+                return ['cache:key2'];
+            });
+        $redis->expects($this->exactly(2))
+            ->method('del');
+
+        $adapter = new RedisAdapter($redis);
+
+        $this->assertTrue($adapter->clear());
+    }
+
+    public function testClearThrowsExceptionInModeThrow(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('scan')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_THROW);
+
+        $this->expectException(CacheException::class);
+        $adapter->clear();
+    }
+
+    public function testClearReturnsFalseInModeFail(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('scan')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
+
+        $this->assertFalse($adapter->clear());
     }
 
     public function testHas(): void
@@ -225,13 +313,34 @@ class RedisAdapterTest extends TestCase
         $this->assertFalse($adapter->has('key'));
     }
 
+    public function testHasThrowsExceptionInModeThrow(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('exists')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_THROW);
+
+        $this->expectException(CacheException::class);
+        $adapter->has('key');
+    }
+
+    public function testHasReturnsFalseInModeFail(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('exists')->willThrowException(new RedisException('Connection lost'));
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
+
+        $this->assertFalse($adapter->has('key'));
+    }
+
     public function testGetMultiple(): void
     {
         $redis = $this->createConnectedRedisMock();
         $redis->expects($this->once())
             ->method('mGet')
             ->with(['cache:key1', 'cache:key2', 'cache:key3'])
-            ->willReturn(['value1', 'value2', false]);
+            ->willReturn([serialize('value1'), serialize('value2'), false]);
 
         $adapter = new RedisAdapter($redis);
 
@@ -249,7 +358,7 @@ class RedisAdapterTest extends TestCase
     public function testGetMultipleWithDefault(): void
     {
         $redis = $this->createConnectedRedisMock();
-        $redis->method('mGet')->willReturn(['value1', false]);
+        $redis->method('mGet')->willReturn([serialize('value1'), false]);
 
         $adapter = new RedisAdapter($redis);
 
@@ -261,6 +370,23 @@ class RedisAdapterTest extends TestCase
         ];
 
         $this->assertEquals($expected, $result);
+    }
+
+    public function testGetMultipleWithFalseValue(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('mGet')->willReturn([serialize(false), false]);
+
+        $adapter = new RedisAdapter($redis);
+
+        $result = $adapter->getMultiple(['key1', 'key2'], 'default');
+
+        $expected = [
+            'key1' => false,
+            'key2' => 'default',
+        ];
+
+        $this->assertSame($expected, $result);
     }
 
     public function testGetMultipleWithEmptyArray(): void
@@ -280,7 +406,7 @@ class RedisAdapterTest extends TestCase
         $redis->expects($this->once())
             ->method('mGet')
             ->with(['cache:key1', 'cache:key2'])
-            ->willReturn(['value1', false]);
+            ->willReturn([serialize('value1'), false]);
 
         $adapter = new RedisAdapter($redis);
 
@@ -297,7 +423,7 @@ class RedisAdapterTest extends TestCase
     public function testGetMultipleWithIterator(): void
     {
         $redis = $this->createConnectedRedisMock();
-        $redis->method('mGet')->willReturn(['value1', 'value2']);
+        $redis->method('mGet')->willReturn([serialize('value1'), serialize('value2')]);
 
         $adapter = new RedisAdapter($redis);
 
@@ -318,8 +444,8 @@ class RedisAdapterTest extends TestCase
         $redis->expects($this->once())
             ->method('mSet')
             ->with([
-                'cache:key1' => 'value1',
-                'cache:key2' => 'value2',
+                'cache:key1' => serialize('value1'),
+                'cache:key2' => serialize('value2'),
             ])
             ->willReturn(true);
 
@@ -430,6 +556,16 @@ class RedisAdapterTest extends TestCase
         $this->assertTrue($result);
     }
 
+    public function testDeleteMultipleWithNonExistentKeys(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->method('del')->willReturn(0);
+
+        $adapter = new RedisAdapter($redis);
+
+        $this->assertTrue($adapter->deleteMultiple(['nonexistent1', 'nonexistent2']));
+    }
+
     public function testDeleteMultipleWithEmptyArray(): void
     {
         $redis = $this->createConnectedRedisMock();
@@ -505,7 +641,7 @@ class RedisAdapterTest extends TestCase
     {
         $redis = $this->createConnectedRedisMock();
         $redis->method('set')->willReturn(true);
-        $redis->method('get')->willReturn('data');
+        $redis->method('get')->willReturn(serialize('data'));
 
         $adapter = new RedisAdapter($redis);
 
@@ -518,12 +654,43 @@ class RedisAdapterTest extends TestCase
         $redis = $this->createConnectedRedisMock();
         $redis->expects($this->once())
             ->method('set')
-            ->with('cache:mykey', 'myvalue')
+            ->with('cache:mykey', serialize('myvalue'))
             ->willReturn(true);
 
         $adapter = new RedisAdapter($redis);
 
         $adapter->set('mykey', 'myvalue');
+    }
+
+    public function testCustomPrefix(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->expects($this->once())
+            ->method('set')
+            ->with('app:mykey', serialize('myvalue'))
+            ->willReturn(true);
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_THROW, 'app:');
+
+        $adapter->set('mykey', 'myvalue');
+    }
+
+    public function testCustomPrefixInGetAndHas(): void
+    {
+        $redis = $this->createConnectedRedisMock();
+        $redis->expects($this->once())
+            ->method('get')
+            ->with('myapp:key')
+            ->willReturn(serialize('value'));
+        $redis->expects($this->once())
+            ->method('exists')
+            ->with('myapp:key')
+            ->willReturn(1);
+
+        $adapter = new RedisAdapter($redis, RedisAdapter::MODE_THROW, 'myapp:');
+
+        $this->assertEquals('value', $adapter->get('key'));
+        $this->assertTrue($adapter->has('key'));
     }
 
     public function testSetMode(): void
@@ -682,7 +849,7 @@ class RedisAdapterTest extends TestCase
     {
         $redis = $this->createConnectedRedisMock();
         $redis->method('set')->willReturn(true);
-        $redis->method('get')->willReturn('value');
+        $redis->method('get')->willReturn(serialize('value'));
 
         $adapter = new RedisAdapter($redis);
 
@@ -695,7 +862,7 @@ class RedisAdapterTest extends TestCase
     {
         $redis = $this->createConnectedRedisMock();
         $redis->method('set')->willReturn(true);
-        $redis->method('get')->willReturn('uuid_value');
+        $redis->method('get')->willReturn(serialize('uuid_value'));
 
         $adapter = new RedisAdapter($redis);
 

@@ -76,11 +76,11 @@ use Redis;
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// Create Redis adapter (default MODE_THROW)
+// Create Redis adapter (default MODE_THROW, prefix "cache:")
 $adapter = new RedisAdapter($redis);
 
-// Or with graceful error handling
-$adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL);
+// Or with custom prefix and graceful error handling
+$adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL, 'myapp:');
 
 // Create cache instance
 $cache = new Cache($adapter);
@@ -178,19 +178,21 @@ Redis-based cache implementation for high-performance and distributed applicatio
 **Constructor Parameters:**
 - `$redis` (Redis): Connected Redis instance
 - `$mode` (int): Error handling mode (optional, default: MODE_THROW)
+- `$prefix` (string): Key prefix for namespace isolation (optional, default: `cache:`)
 
 **Features:**
 - **Optimized batch operations using Redis native commands** (mGet, mSet, del)
   - `getMultiple()` uses single mGet call instead of N individual gets
   - `setMultiple()` uses atomic mSet when no TTL is specified
   - `deleteMultiple()` uses single del call with array of keys
-- **Native Redis serialization** (PHP serializer by default)
+- **Manual serialization** — correctly handles all PHP types including `false`
+- **Production-safe `clear()`** — uses SCAN instead of KEYS to avoid blocking Redis
 - **Two error handling modes:**
   - `RedisAdapter::MODE_THROW` - Throws exceptions on errors (default)
   - `RedisAdapter::MODE_FAIL` - Returns false/default on errors (graceful degradation)
 - **Automatic deduplication** of keys in batch operations
+- **Configurable key prefix** for multi-app namespace isolation
 - Native Redis TTL support
-- Key prefixing (prefix: `cache:`)
 - Runtime mode switching with `setMode()` method
 - Suitable for distributed systems
 
@@ -222,7 +224,7 @@ The library provides PSR-16 compliant exceptions:
 
 - PHP 8.1 or higher
 - psr/simple-cache ^3.0
-- ext-redis
+- ext-redis (for Redis adapter)
 
 ## License
 

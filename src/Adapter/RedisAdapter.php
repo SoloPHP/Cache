@@ -12,7 +12,6 @@ use Solo\Cache\Exception\InvalidArgumentException;
 class RedisAdapter implements CacheAdapterInterface
 {
     private const KEY_PATTERN = '/^[a-zA-Z0-9_.:-]+$/';
-    private const KEY_PREFIX = 'cache:';
 
     // Error handling modes
     public const MODE_THROW = 0;  // Throw exceptions on errors
@@ -22,7 +21,8 @@ class RedisAdapter implements CacheAdapterInterface
 
     public function __construct(
         private readonly Redis $redis,
-        int $mode = self::MODE_THROW
+        int $mode = self::MODE_THROW,
+        private readonly string $prefix = 'cache:'
     ) {
         $this->mode = $mode;
 
@@ -30,12 +30,12 @@ class RedisAdapter implements CacheAdapterInterface
             if ($this->mode === self::MODE_THROW) {
                 throw new CacheException('Redis connection is not established');
             }
+            return;
         }
 
-        // Configure Redis serialization if not set
-        if ($this->redis->getOption(Redis::OPT_SERIALIZER) === Redis::SERIALIZER_NONE) {
-            $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_PHP);
-        }
+        // Disable Redis built-in serialization - we handle it manually
+        // to correctly distinguish cache misses from stored false values
+        $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_NONE);
     }
 
     /**
@@ -53,11 +53,11 @@ class RedisAdapter implements CacheAdapterInterface
         try {
             $value = $this->redis->get($this->getPrefixedKey($key));
 
-            if ($value === false) {
+            if (!is_string($value)) {
                 return $default;
             }
 
-            return $value; // Redis handles unserialization automatically
+            return unserialize($value);
         } catch (\RedisException $e) {
             if ($this->mode === self::MODE_THROW) {
                 throw new CacheException('Redis get operation failed: ' . $e->getMessage(), 0, $e);
@@ -72,17 +72,18 @@ class RedisAdapter implements CacheAdapterInterface
 
         $prefixedKey = $this->getPrefixedKey($key);
         $ttlSeconds = $this->calculateTtlSeconds($ttl);
+        $serialized = serialize($value);
 
         try {
             if ($ttlSeconds === null) {
-                return $this->redis->set($prefixedKey, $value); // Redis handles serialization
+                return $this->redis->set($prefixedKey, $serialized);
             }
 
             if ($ttlSeconds <= 0) {
                 return $this->delete($key);
             }
 
-            return $this->redis->setex($prefixedKey, $ttlSeconds, $value); // Redis handles serialization
+            return $this->redis->setex($prefixedKey, $ttlSeconds, $serialized);
         } catch (\RedisException $e) {
             if ($this->mode === self::MODE_THROW) {
                 throw new CacheException('Redis set operation failed: ' . $e->getMessage(), 0, $e);
@@ -95,25 +96,40 @@ class RedisAdapter implements CacheAdapterInterface
     {
         $this->validateKey($key);
 
-        /** @var int $result */
-        $result = $this->redis->del($this->getPrefixedKey($key));
+        try {
+            /** @var int $result */
+            $result = $this->redis->del($this->getPrefixedKey($key));
 
-        return $result >= 0;
+            return $result >= 0;
+        } catch (\RedisException $e) {
+            if ($this->mode === self::MODE_THROW) {
+                throw new CacheException('Redis delete operation failed: ' . $e->getMessage(), 0, $e);
+            }
+            return false;
+        }
     }
 
     public function clear(): bool
     {
-        $pattern = $this->getPrefixedKey('*');
-        $keys = $this->redis->keys($pattern);
+        try {
+            $pattern = $this->getPrefixedKey('*');
+            $iterator = null;
 
-        if (empty($keys)) {
+            do {
+                $keys = $this->redis->scan($iterator, $pattern, 100);
+
+                if ($keys !== false && !empty($keys)) {
+                    $this->redis->del($keys);
+                }
+            } while ($iterator > 0);
+
             return true;
+        } catch (\RedisException $e) {
+            if ($this->mode === self::MODE_THROW) {
+                throw new CacheException('Redis clear operation failed: ' . $e->getMessage(), 0, $e);
+            }
+            return false;
         }
-
-        /** @var int $result */
-        $result = $this->redis->del($keys);
-
-        return $result > 0;
     }
 
     public function getMultiple(iterable $keys, mixed $default = null): iterable
@@ -135,11 +151,11 @@ class RedisAdapter implements CacheAdapterInterface
             // Single mGet call for all keys
             $rawValues = $this->redis->mGet($prefixedKeys);
 
-            // Build result array (Redis handles unserialization)
+            // Build result array with manual deserialization
             $result = [];
             foreach ($keyArray as $index => $key) {
                 $value = $rawValues[$index];
-                $result[$key] = $value === false ? $default : $value;
+                $result[$key] = is_string($value) ? unserialize($value) : $default;
             }
         } catch (\RedisException $e) {
             if ($this->mode === self::MODE_THROW) {
@@ -170,7 +186,7 @@ class RedisAdapter implements CacheAdapterInterface
                     throw new InvalidArgumentException('Cache key must be a string');
                 }
                 $this->validateKey($key);
-                $prefixedValues[$this->getPrefixedKey($key)] = $value; // Redis handles serialization
+                $prefixedValues[$this->getPrefixedKey($key)] = serialize($value);
             }
 
             try {
@@ -219,8 +235,8 @@ class RedisAdapter implements CacheAdapterInterface
             /** @var int $result */
             $result = $this->redis->del($prefixedKeys);
 
-            // Redis returns number of deleted keys
-            return $result > 0;
+            // Redis returns number of deleted keys; not finding a key is not an error
+            return $result >= 0;
         } catch (\RedisException $e) {
             if ($this->mode === self::MODE_THROW) {
                 throw new CacheException('Redis del operation failed: ' . $e->getMessage(), 0, $e);
@@ -233,15 +249,22 @@ class RedisAdapter implements CacheAdapterInterface
     {
         $this->validateKey($key);
 
-        /** @var int|bool $result */
-        $result = $this->redis->exists($this->getPrefixedKey($key));
+        try {
+            /** @var int|bool $result */
+            $result = $this->redis->exists($this->getPrefixedKey($key));
 
-        return is_int($result) && $result > 0;
+            return is_int($result) && $result > 0;
+        } catch (\RedisException $e) {
+            if ($this->mode === self::MODE_THROW) {
+                throw new CacheException('Redis has operation failed: ' . $e->getMessage(), 0, $e);
+            }
+            return false;
+        }
     }
 
     private function getPrefixedKey(string $key): string
     {
-        return self::KEY_PREFIX . $key;
+        return $this->prefix . $key;
     }
 
     private function validateKey(string $key): void
