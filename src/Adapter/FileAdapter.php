@@ -5,319 +5,322 @@ declare(strict_types=1);
 namespace Solo\Cache\Adapter;
 
 use DateInterval;
+use DirectoryIterator;
+use Random\RandomException;
 use Solo\Cache\Exception\CacheException;
-use Solo\Cache\Exception\InvalidArgumentException;
+use Solo\Cache\Internal\Key;
+use Solo\Cache\Internal\PhpSerializer;
+use Solo\Cache\Internal\Ttl;
+use UnexpectedValueException;
 
-class FileAdapter implements CacheAdapterInterface
+class FileAdapter extends AbstractAdapter
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:-]+$/';
+    private const string ENTRY = 'solo-[a-f0-9]{64}\.cache';
 
-    // Error handling modes
-    public const MODE_THROW = 0;  // Throw exceptions on errors
-    public const MODE_FAIL = 1;   // Return false/default on errors
+    private const string TEMPORARY = '\.solo-cache-[a-f0-9]{16}\.tmp';
 
-    private int $mode;
+    /** Longest entry header: two 19-digit numbers, a space and a newline. */
+    private const int HEADER_MAX = 40;
 
-    public function __construct(
-        private readonly string $cacheDirectory,
-        int $mode = self::MODE_THROW
-    ) {
-        $this->mode = $mode;
-        $this->initializeCacheDirectory();
-    }
+    private readonly string $cacheDirectory;
 
-    /**
-     * Set error handling mode at runtime
-     */
-    public function setMode(int $mode): void
+    public function __construct(string $cacheDirectory, ErrorMode $mode = ErrorMode::Throw)
     {
-        $this->mode = $mode;
+        parent::__construct($mode);
+
+        if ($cacheDirectory === '' || str_contains($cacheDirectory, "\0")) {
+            throw new CacheException('Invalid cache directory');
+        }
+
+        if (!is_dir($cacheDirectory) && !@mkdir($cacheDirectory, 0700, true) && !is_dir($cacheDirectory)) {
+            throw new CacheException('Failed to create cache directory: ' . $cacheDirectory);
+        }
+
+        $directory = realpath($cacheDirectory);
+        if ($directory === false || !is_writable($directory)) {
+            throw new CacheException('Cache directory is not writable: ' . $cacheDirectory);
+        }
+
+        $this->cacheDirectory = $directory;
     }
 
     public function get(string $key, mixed $default = null): mixed
     {
-        $this->validateKey($key);
-
-        $filePath = $this->getFilePath($key);
-
-        if (!file_exists($filePath)) {
+        Key::validate($key);
+        $handle = $this->open($this->path($key));
+        if (!is_resource($handle)) {
             return $default;
         }
 
-        $data = $this->loadCacheData($filePath);
+        try {
+            // The header comes first, so an expired or truncated entry is neither read nor restored.
+            $header = $this->header($handle);
+            if ($header === null || $this->isExpired($header['expires'])) {
+                return $default;
+            }
 
-        if ($data === null) {
-            $this->delete($key);
-            return $default;
+            $payload = stream_get_contents($handle);
+        } finally {
+            fclose($handle);
         }
 
-        if ($data['expires_at'] !== null && $data['expires_at'] < time()) {
-            $this->delete($key);
-            return $default;
-        }
-
-        return $data['value'];
+        return is_string($payload) && strlen($payload) === $header['length']
+            ? PhpSerializer::decode($payload, $default)
+            : $default;
     }
 
     public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
     {
-        $this->validateKey($key);
-
-        $expiresAt = $this->calculateExpiration($ttl);
-
-        // If TTL is negative or zero, delete the key immediately
-        if ($expiresAt !== null && $expiresAt <= time()) {
+        Key::validate($key);
+        $seconds = Ttl::seconds($ttl);
+        if ($seconds !== null && $seconds <= 0) {
             return $this->delete($key);
         }
 
-        $filePath = $this->getFilePath($key);
+        $now = time();
+        $expiresAt = $seconds === null ? 0 : $now + min($seconds, PHP_INT_MAX - $now);
 
-        $data = [
-            'value' => $value,
-            'expires_at' => $expiresAt,
-        ];
-
-        $serialized = serialize($data);
-
-        $result = @file_put_contents($filePath, $serialized, LOCK_EX);
-
-        if ($result === false) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException("Failed to write cache file: {$filePath}");
-            }
+        $payload = $this->encode($value);
+        if ($payload === false) {
             return false;
         }
+        $content = $expiresAt . ' ' . strlen($payload) . "\n" . $payload;
 
-        return true;
+        return $this->withLock(function () use ($key, $content): bool {
+            // A temporary file in the pool directory keeps rename() atomic; 'x' never reuses one.
+            try {
+                $temporary = $this->cacheDirectory . '/.solo-cache-' . bin2hex(random_bytes(8)) . '.tmp';
+            } catch (RandomException $exception) {
+                return $this->fail('Failed to name a temporary cache file', $exception);
+            }
+            $handle = @fopen($temporary, 'xb');
+            if ($handle === false) {
+                return $this->fail('Failed to create a temporary cache file: ' . $temporary);
+            }
+            fclose($handle);
+
+            $published = false;
+            try {
+                $path = $this->path($key);
+                if (!@chmod($temporary, 0600) || @file_put_contents($temporary, $content) !== strlen($content)) {
+                    return $this->fail('Failed to write cache file: ' . $temporary);
+                }
+                if (!@rename($temporary, $path)) {
+                    return $this->fail('Failed to replace cache file: ' . $path);
+                }
+
+                $published = true;
+                return true;
+            } finally {
+                if (!$published) {
+                    @unlink($temporary);
+                }
+            }
+        });
     }
 
     public function delete(string $key): bool
     {
-        $this->validateKey($key);
+        Key::validate($key);
 
-        $filePath = $this->getFilePath($key);
-
-        if (!file_exists($filePath)) {
-            return true;
-        }
-
-        return @unlink($filePath);
+        return $this->withLock(fn (): bool => $this->remove($this->path($key)));
     }
 
     public function clear(): bool
     {
-        $files = glob($this->cacheDirectory . '/*') ?: [];
-
-        $success = true;
-
-        foreach ($files as $file) {
-            if (is_file($file)) {
-                $success = @unlink($file) && $success;
-            }
-        }
-
-        return $success;
-    }
-
-    public function getMultiple(iterable $keys, mixed $default = null): iterable
-    {
-        // Convert to array and remove duplicates
-        $keyArray = is_array($keys) ? array_values($keys) : iterator_to_array($keys);
-        $keyArray = array_unique($keyArray);
-
-        $this->validateKeys($keyArray);
-
-        if (empty($keyArray)) {
-            return [];
-        }
-
-        $values = [];
-        foreach ($keyArray as $key) {
-            $values[$key] = $this->get($key, $default);
-        }
-
-        return $values;
-    }
-
-    public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
-    {
-        $valueArray = is_array($values) ? $values : iterator_to_array($values);
-
-        if (empty($valueArray)) {
-            return true;
-        }
-
-        $success = true;
-        foreach ($valueArray as $key => $value) {
-            if (!is_string($key)) {
-                throw new InvalidArgumentException('Cache key must be a string');
+        return $this->withLock(function (): bool {
+            $files = $this->files(self::ENTRY . '|' . self::TEMPORARY);
+            if ($files === false) {
+                return false;
             }
 
-            $success = $this->set($key, $value, $ttl) && $success;
-        }
-
-        return $success;
-    }
-
-    public function deleteMultiple(iterable $keys): bool
-    {
-        // Convert to array and remove duplicates
-        $keyArray = is_array($keys) ? array_values($keys) : iterator_to_array($keys);
-        $keyArray = array_unique($keyArray);
-
-        $this->validateKeys($keyArray);
-
-        if (empty($keyArray)) {
-            return true;
-        }
-
-        $success = true;
-        foreach ($keyArray as $key) {
-            $success = $this->delete($key) && $success;
-        }
-
-        return $success;
-    }
-
-    public function has(string $key): bool
-    {
-        $this->validateKey($key);
-
-        $filePath = $this->getFilePath($key);
-
-        if (!file_exists($filePath)) {
-            return false;
-        }
-
-        // Check expiration without loading the value
-        $data = $this->loadCacheData($filePath);
-
-        if ($data === null) {
-            $this->delete($key);
-            return false;
-        }
-
-        if ($data['expires_at'] !== null && $data['expires_at'] < time()) {
-            $this->delete($key);
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
-     * Load and validate cache data from file
-     * @return array{value: mixed, expires_at: ?int}|null
-     */
-    private function loadCacheData(string $filePath): ?array
-    {
-        $content = @file_get_contents($filePath);
-
-        if ($content === false) {
-            return null;
-        }
-
-        $data = @unserialize($content);
-
-        if ($data === false || !is_array($data)) {
-            return null;
-        }
-
-        if (!isset($data['value']) || !array_key_exists('expires_at', $data)) {
-            return null;
-        }
-
-        /** @var array{value: mixed, expires_at: ?int} $data */
-        return $data;
-    }
-
-    private function initializeCacheDirectory(): void
-    {
-        if (!is_dir($this->cacheDirectory)) {
-            if (!@mkdir($this->cacheDirectory, 0755, true)) {
-                throw new CacheException("Failed to create cache directory: {$this->cacheDirectory}");
-            }
-        }
-
-        if (!is_writable($this->cacheDirectory)) {
-            throw new CacheException("Cache directory is not writable: {$this->cacheDirectory}");
-        }
-    }
-
-    private function getFilePath(string $key): string
-    {
-        return $this->cacheDirectory . '/' . md5($key) . '.cache';
-    }
-
-    private function validateKey(string $key): void
-    {
-        if ($key === '') {
-            throw new InvalidArgumentException('Cache key cannot be empty');
-        }
-
-        if (!preg_match(self::KEY_PATTERN, $key)) {
-            throw new InvalidArgumentException(
-                'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed.'
-            );
-        }
-    }
-
-    /**
-     * @param iterable<mixed> $keys
-     */
-    private function validateKeys(iterable $keys): void
-    {
-        foreach ($keys as $key) {
-            if (!is_string($key)) {
-                throw new InvalidArgumentException('Cache key must be a string');
+            $success = true;
+            foreach ($files as $file) {
+                $success = $this->remove($file) && $success;
             }
 
-            $this->validateKey($key);
-        }
+            return $success;
+        });
     }
 
-
-    private function calculateExpiration(null|int|DateInterval $ttl): ?int
-    {
-        if ($ttl === null) {
-            return null;
-        }
-
-        if ($ttl instanceof DateInterval) {
-            $now = new \DateTimeImmutable();
-            $expiresAt = $now->add($ttl);
-            return $expiresAt->getTimestamp();
-        }
-
-        if ($ttl <= 0) {
-            return time();
-        }
-
-        return time() + $ttl;
-    }
-
-    /**
-     * Garbage collection - remove expired cache files
-     * Can be called periodically via cron or manually
-     */
+    /** Remove expired or corrupt entries. Schedule this periodically for file caches. */
     public function gc(): int
     {
-        $files = glob($this->cacheDirectory . '/*.cache') ?: [];
+        $files = $this->files(self::ENTRY);
+        if ($files === false) {
+            return 0;
+        }
 
         $deleted = 0;
-        $now = time();
-
         foreach ($files as $file) {
-            $data = $this->loadCacheData($file);
+            // Only headers are read, so no application code runs. The check is repeated
+            // under the lock because a writer may have replaced the entry in between.
+            if ($this->stale($file) && $this->withLock(fn (): bool => $this->stale($file) && $this->remove($file))) {
+                $deleted++;
+            }
+        }
 
-            if ($data === null || ($data['expires_at'] !== null && $data['expires_at'] < $now)) {
-                if (@unlink($file)) {
+        // Writers keep a temporary file only while they hold the lock, so one
+        // seen under the lock was left behind by a writer that crashed.
+        $this->withLock(function () use (&$deleted): bool {
+            foreach ($this->files(self::TEMPORARY) ?: [] as $file) {
+                if ($this->remove($file)) {
                     $deleted++;
                 }
             }
-        }
+
+            return true;
+        });
 
         return $deleted;
+    }
+
+    private function path(string $key): string
+    {
+        return $this->cacheDirectory . '/solo-' . hash('sha256', $key) . '.cache';
+    }
+
+    /** @return resource|false|null The open entry, false after a failure in ErrorMode::Fail, or null if missing. */
+    private function open(string $path): mixed
+    {
+        $handle = @fopen($path, 'rb');
+        if ($handle !== false) {
+            return $handle;
+        }
+
+        if ($this->exists($path)) {
+            // A writer may have published the file after the first open missed.
+            $handle = @fopen($path, 'rb');
+            if ($handle !== false) {
+                return $handle;
+            }
+            if ($this->exists($path)) {
+                return $this->fail('Failed to read cache file: ' . $path);
+            }
+        }
+
+        clearstatcache(true, $this->cacheDirectory);
+        if (
+            !is_dir($this->cacheDirectory)
+            || (PHP_OS_FAMILY !== 'Windows' && !is_executable($this->cacheDirectory))
+        ) {
+            return $this->fail('Cannot access cache directory: ' . $this->cacheDirectory);
+        }
+
+        return null;
+    }
+
+    /**
+     * Reads the "<expiry> <length>\n" line that precedes the serialized value, leaving the handle
+     * at the value. An expiry of 0 means none, and the length must match the rest of the file.
+     *
+     * @param resource $handle
+     * @return array{expires: int, length: int}|null
+     */
+    private function header($handle): ?array
+    {
+        $line = @fgets($handle, self::HEADER_MAX + 1);
+        $stat = fstat($handle);
+        if (
+            $line === false
+            || $stat === false
+            || preg_match('/\A(\d{1,19}) (\d{1,19})\n\z/', $line, $match) !== 1
+            || (int) $match[2] !== $stat['size'] - strlen($line)
+        ) {
+            return null;
+        }
+
+        return ['expires' => (int) $match[1], 'length' => (int) $match[2]];
+    }
+
+    /**
+     * Whether an entry is expired or damaged, judged by its header and size alone.
+     *
+     * @phpstan-impure Another process can replace the entry between checks.
+     */
+    private function stale(string $path): bool
+    {
+        $handle = $this->open($path);
+        if (!is_resource($handle)) {
+            return false;
+        }
+
+        try {
+            $header = $this->header($handle);
+        } finally {
+            fclose($handle);
+        }
+
+        return $header === null || $this->isExpired($header['expires']);
+    }
+
+    private function isExpired(int $expires): bool
+    {
+        return $expires !== 0 && $expires <= time();
+    }
+
+    private function remove(string $path): bool
+    {
+        if (@unlink($path) || !$this->exists($path)) {
+            return true;
+        }
+
+        return $this->fail('Failed to remove cache file: ' . $path);
+    }
+
+    /** @phpstan-impure Another process can replace the file between reads. */
+    private function exists(string $path): bool
+    {
+        clearstatcache(true, $path);
+
+        return file_exists($path) || is_link($path);
+    }
+
+    /** @return list<string>|false */
+    private function files(string $names): array|false
+    {
+        try {
+            $directory = new DirectoryIterator($this->cacheDirectory);
+        } catch (UnexpectedValueException $exception) {
+            return $this->fail('Failed to list cache directory: ' . $this->cacheDirectory, $exception);
+        }
+
+        $pattern = '/\A(?:' . $names . ')\z/';
+        $files = [];
+        foreach ($directory as $file) {
+            if (preg_match($pattern, $file->getFilename()) === 1 && $file->isFile()) {
+                $files[] = $file->getPathname();
+            }
+        }
+
+        return $files;
+    }
+
+    /**
+     * The lock file is permanent: removing it would allow concurrent processes to
+     * lock different inodes. Reads use atomic snapshots and never remove entries.
+     *
+     * @param callable(): bool $operation
+     */
+    private function withLock(callable $operation): bool
+    {
+        $path = $this->cacheDirectory . '/.solo-cache.lock';
+        $lock = @fopen($path, 'c+b');
+        if ($lock === false) {
+            return $this->fail('Failed to open cache lock: ' . $path);
+        }
+
+        try {
+            $stat = fstat($lock);
+            $private = $stat !== false && ($stat['mode'] & 0777) === 0600;
+            if (!($private || @chmod($path, 0600)) || !flock($lock, LOCK_EX)) {
+                return $this->fail('Failed to acquire cache lock: ' . $path);
+            }
+
+            return $operation();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
     }
 }

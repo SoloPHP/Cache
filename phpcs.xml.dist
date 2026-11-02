@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<ruleset name="Solo Cache">
+    <description>PSR-12 for library code and tests.</description>
+    <file>src</file>
+    <file>tests</file>
+    <arg name="colors"/>
+    <arg value="p"/>
+    <rule ref="PSR12"/>
+</ruleset>

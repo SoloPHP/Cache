@@ -6,307 +6,352 @@ namespace Solo\Cache\Adapter;
 
 use DateInterval;
 use Redis;
+use RedisException;
 use Solo\Cache\Exception\CacheException;
 use Solo\Cache\Exception\InvalidArgumentException;
+use Solo\Cache\Internal\Key;
+use Solo\Cache\Internal\PhpSerializer;
+use Solo\Cache\Internal\Ttl;
 
-class RedisAdapter implements CacheAdapterInterface
+class RedisAdapter extends AbstractAdapter
 {
-    private const KEY_PATTERN = '/^[a-zA-Z0-9_.:-]+$/';
+    /**
+     * About 285,000 years: far below the point where Redis rejects an expiration as overflowing.
+     * A 32-bit build cannot express it, and every TTL it can express is already shorter.
+     */
+    private const int MAX_TTL = PHP_INT_SIZE === 8 ? 9_000_000_000_000 : PHP_INT_MAX;
 
-    // Error handling modes
-    public const MODE_THROW = 0;  // Throw exceptions on errors
-    public const MODE_FAIL = 1;   // Return false/default on errors
+    private readonly string $prefix;
 
-    private int $mode;
+    /** Once connected, phpredis reconnects on the next command after a dropped connection. */
+    private bool $established = false;
 
     public function __construct(
         private readonly Redis $redis,
-        int $mode = self::MODE_THROW,
-        private readonly string $prefix = 'cache:'
+        ErrorMode $mode = ErrorMode::Throw,
+        string $prefix = 'cache:'
     ) {
-        $this->mode = $mode;
+        parent::__construct($mode);
 
-        if (!$this->redis->isConnected()) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis connection is not established');
-            }
+        if ($prefix === '') {
+            throw new InvalidArgumentException('Redis cache prefix cannot be empty');
+        }
+
+        $this->prefix = str_ends_with($prefix, ':') ? $prefix : $prefix . ':';
+
+        $this->established = $redis->isConnected();
+        if (!$this->established) {
+            $this->fail('Redis connection is not established');
             return;
         }
 
-        // Disable Redis built-in serialization - we handle it manually
-        // to correctly distinguish cache misses from stored false values
-        $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_NONE);
-    }
-
-    /**
-     * Set error handling mode at runtime
-     */
-    public function setMode(int $mode): void
-    {
-        $this->mode = $mode;
+        $this->assertClientConfiguration();
     }
 
     public function get(string $key, mixed $default = null): mixed
     {
-        $this->validateKey($key);
+        Key::validate($key);
 
-        try {
-            $value = $this->redis->get($this->getPrefixedKey($key));
-
-            if (!is_string($value)) {
-                return $default;
+        $value = $this->run('get', function () use ($key): string|false {
+            $value = $this->redis->get($this->prefix . $key);
+            if ($value !== false && !is_string($value)) {
+                throw new CacheException('Unexpected Redis GET response');
             }
 
-            return unserialize($value);
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis get operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            return $default;
-        }
+            return $value;
+        }, false);
+
+        // Values are encoded and decoded outside run(): their hooks may use this client.
+        return $value === false ? $default : PhpSerializer::decode($value, $default);
     }
 
     public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
     {
-        $this->validateKey($key);
+        Key::validate($key);
+        $seconds = $this->seconds($ttl);
 
-        $prefixedKey = $this->getPrefixedKey($key);
-        $ttlSeconds = $this->calculateTtlSeconds($ttl);
-        $serialized = serialize($value);
+        if ($seconds !== null && $seconds <= 0) {
+            return $this->delete($key);
+        }
 
-        try {
-            if ($ttlSeconds === null) {
-                return $this->redis->set($prefixedKey, $serialized);
-            }
-
-            if ($ttlSeconds <= 0) {
-                return $this->delete($key);
-            }
-
-            return $this->redis->setex($prefixedKey, $ttlSeconds, $serialized);
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis set operation failed: ' . $e->getMessage(), 0, $e);
-            }
+        if (!$this->ready('set')) {
             return false;
         }
+
+        $serialized = $this->encode($value);
+        if ($serialized === false) {
+            return false;
+        }
+
+        return $this->run('set', function () use ($key, $serialized, $seconds): bool {
+            $result = $seconds === null
+                ? $this->redis->set($this->prefix . $key, $serialized)
+                : $this->redis->setex($this->prefix . $key, $seconds, $serialized);
+
+            return $this->requireWriteSuccess($result);
+        }, false);
     }
 
     public function delete(string $key): bool
     {
-        $this->validateKey($key);
+        Key::validate($key);
 
-        try {
-            /** @var int $result */
-            $result = $this->redis->del($this->getPrefixedKey($key));
-
-            return $result >= 0;
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis delete operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            return false;
-        }
+        return $this->run('delete', fn(): bool => $this->requireDeleteSuccess(
+            $this->redis->del($this->prefix . $key)
+        ), false);
     }
 
     public function clear(): bool
     {
-        try {
-            $pattern = $this->getPrefixedKey('*');
+        return $this->run('clear', function (): bool {
+            $pattern = addcslashes($this->prefix, '\\*?[]') . '*';
             $iterator = null;
 
             do {
-                $keys = $this->redis->scan($iterator, $pattern, 100);
+                $keys = $this->redis->scan($iterator, $pattern, 1000);
+                $this->checkLastError();
 
-                if ($keys !== false && !empty($keys)) {
-                    $this->redis->del($keys);
+                if (!is_int($iterator) && !is_string($iterator)) {
+                    throw new CacheException('Redis SCAN did not return a cursor');
                 }
-            } while ($iterator > 0);
+
+                $owned = [];
+                foreach ($keys ?: [] as $key) {
+                    if (
+                        str_starts_with($key, $this->prefix)
+                        && Key::isValid(substr($key, strlen($this->prefix)))
+                    ) {
+                        $owned[] = $key;
+                    }
+                }
+
+                if ($owned !== []) {
+                    $this->requireDeleteSuccess($this->redis->del($owned));
+                }
+            } while ((string) $iterator !== '0');
 
             return true;
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis clear operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            return false;
-        }
+        }, false);
     }
 
+    #[\Override]
     public function getMultiple(iterable $keys, mixed $default = null): iterable
     {
-        // Convert to array and remove duplicates
-        $keyArray = is_array($keys) ? array_values($keys) : iterator_to_array($keys);
-        $keyArray = array_values(array_unique($keyArray));
+        $keys = Key::keys($keys);
 
-        $this->validateKeys($keyArray);
-
-        if (empty($keyArray)) {
+        if ($keys === []) {
             return [];
         }
 
-        // Prepare prefixed keys for batch operation
-        $prefixedKeys = array_map(fn($k) => $this->getPrefixedKey($k), $keyArray);
+        $rawValues = $this->run('getMultiple', function () use ($keys): array {
+            $rawValues = $this->redis->mGet($this->prefixed($keys));
 
-        try {
-            // Single mGet call for all keys
-            $rawValues = $this->redis->mGet($prefixedKeys);
+            if (!is_array($rawValues) || count($rawValues) !== count($keys)) {
+                throw new CacheException('Unexpected Redis MGET response');
+            }
 
-            // Build result array with manual deserialization
-            $result = [];
-            foreach ($keyArray as $index => $key) {
-                $value = $rawValues[$index];
-                $result[$key] = is_string($value) ? unserialize($value) : $default;
+            $rawValues = array_values($rawValues);
+            foreach ($rawValues as $value) {
+                if ($value !== false && !is_string($value)) {
+                    throw new CacheException('Unexpected Redis MGET item');
+                }
             }
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis mGet operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            // Return defaults for all keys on error
-            return array_fill_keys($keyArray, $default);
+
+            /** @var list<string|false> $rawValues */
+            return $rawValues;
+        }, array_fill(0, count($keys), false));
+
+        $values = [];
+        foreach ($keys as $index => $key) {
+            $value = $rawValues[$index];
+            $values[$key] = is_string($value) ? PhpSerializer::decode($value, $default) : $default;
         }
 
-        return $result;
+        return $values;
     }
 
+    #[\Override]
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
-        $valueArray = is_array($values) ? $values : iterator_to_array($values);
+        $values = Key::values($values);
 
-        if (empty($valueArray)) {
+        if ($values === []) {
             return true;
         }
 
-        $ttlSeconds = $this->calculateTtlSeconds($ttl);
+        $seconds = $this->seconds($ttl);
+        if ($seconds !== null && $seconds <= 0) {
+            return $this->deleteMultiple(array_map(strval(...), array_keys($values)));
+        }
 
-        // No TTL: use mSet for atomic batch operation
-        if ($ttlSeconds === null) {
-            $prefixedValues = [];
-            foreach ($valueArray as $key => $value) {
-                if (!is_string($key)) {
-                    throw new InvalidArgumentException('Cache key must be a string');
-                }
-                $this->validateKey($key);
-                $prefixedValues[$this->getPrefixedKey($key)] = serialize($value);
-            }
+        if (!$this->ready('setMultiple')) {
+            return false;
+        }
 
-            try {
-                return $this->redis->mSet($prefixedValues);
-            } catch (\RedisException $e) {
-                if ($this->mode === self::MODE_THROW) {
-                    throw new CacheException('Redis mSet operation failed: ' . $e->getMessage(), 0, $e);
-                }
+        $serialized = [];
+        foreach ($values as $key => $value) {
+            $payload = $this->encode($value);
+            if ($payload === false) {
                 return false;
             }
+            $serialized[$this->prefix . $key] = $payload;
         }
 
-        // With TTL: must use individual setex calls (Redis limitation)
-        if ($ttlSeconds <= 0) {
-            return $this->deleteMultiple(array_keys($valueArray));
-        }
-
-        $success = true;
-        foreach ($valueArray as $key => $value) {
-            if (!is_string($key)) {
-                throw new InvalidArgumentException('Cache key must be a string');
+        return $this->run('setMultiple', function () use ($serialized, $seconds): bool {
+            if ($seconds === null) {
+                return $this->requireWriteSuccess($this->redis->mSet($serialized));
             }
-            $success = $this->set($key, $value, $ttlSeconds) && $success;
-        }
 
-        return $success;
+            $this->redis->pipeline();
+            try {
+                foreach ($serialized as $key => $value) {
+                    $this->redis->setex((string) $key, $seconds, $value);
+                }
+                $results = $this->redis->exec();
+            } finally {
+                // Never leave the client queuing commands after a failure.
+                if ($this->redis->getMode() === Redis::PIPELINE) {
+                    $this->redis->discard();
+                }
+            }
+
+            $this->checkLastError();
+            if (!is_array($results) || count($results) !== count($serialized)) {
+                throw new CacheException('Unexpected Redis pipeline response');
+            }
+
+            foreach ($results as $result) {
+                $this->requireWriteSuccess($result);
+            }
+
+            return true;
+        }, false);
     }
 
+    #[\Override]
     public function deleteMultiple(iterable $keys): bool
     {
-        // Convert to array and remove duplicates
-        $keyArray = is_array($keys) ? array_values($keys) : iterator_to_array($keys);
-        $keyArray = array_unique($keyArray);
+        $keys = Key::keys($keys);
 
-        $this->validateKeys($keyArray);
-
-        if (empty($keyArray)) {
+        if ($keys === []) {
             return true;
         }
 
-        // Prepare prefixed keys for batch operation
-        $prefixedKeys = array_map(fn($k) => $this->getPrefixedKey($k), $keyArray);
+        return $this->run(
+            'deleteMultiple',
+            fn(): bool => $this->requireDeleteSuccess($this->redis->del($this->prefixed($keys))),
+            false
+        );
+    }
+
+    /**
+     * @param list<string> $keys
+     * @return list<string>
+     */
+    private function prefixed(array $keys): array
+    {
+        return array_map(fn(string $key): string => $this->prefix . $key, $keys);
+    }
+
+    /** Seconds until expiry, capped below the point where Redis rejects it as overflowing. */
+    private function seconds(null|int|DateInterval $ttl): ?int
+    {
+        $seconds = Ttl::seconds($ttl);
+
+        return $seconds === null ? null : min($seconds, self::MAX_TTL);
+    }
+
+    /**
+     * @template T
+     * @param callable(): T $callback
+     * @param T $fallback
+     * @return T
+     */
+    private function run(string $operation, callable $callback, mixed $fallback): mixed
+    {
+        if (!$this->ready($operation)) {
+            return $fallback;
+        }
 
         try {
-            // Single del call with array of keys
-            /** @var int $result */
-            $result = $this->redis->del($prefixedKeys);
+            $this->redis->clearLastError();
+            $result = $callback();
+            $this->checkLastError();
 
-            // Redis returns number of deleted keys; not finding a key is not an error
-            return $result >= 0;
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis del operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            return false;
-        }
-    }
+            return $result;
+        } catch (RedisException | CacheException $exception) {
+            $this->fail('Redis ' . $operation . ' operation failed: ' . $exception->getMessage(), $exception);
 
-    public function has(string $key): bool
-    {
-        $this->validateKey($key);
-
-        try {
-            /** @var int|bool $result */
-            $result = $this->redis->exists($this->getPrefixedKey($key));
-
-            return is_int($result) && $result > 0;
-        } catch (\RedisException $e) {
-            if ($this->mode === self::MODE_THROW) {
-                throw new CacheException('Redis has operation failed: ' . $e->getMessage(), 0, $e);
-            }
-            return false;
-        }
-    }
-
-    private function getPrefixedKey(string $key): string
-    {
-        return $this->prefix . $key;
-    }
-
-    private function validateKey(string $key): void
-    {
-        if ($key === '') {
-            throw new InvalidArgumentException('Cache key cannot be empty');
-        }
-
-        if (!preg_match(self::KEY_PATTERN, $key)) {
-            throw new InvalidArgumentException(
-                'Cache key contains invalid characters. ' .
-                'Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed.'
-            );
+            return $fallback;
         }
     }
 
     /**
-     * @param iterable<mixed> $keys
+     * Whether the client can take commands; a storage failure follows the error mode. Writes call
+     * it before serializing too, because value hooks may use the same client.
      */
-    private function validateKeys(iterable $keys): void
+    private function ready(string $operation): bool
     {
-        foreach ($keys as $key) {
-            if (!is_string($key)) {
-                throw new InvalidArgumentException('Cache key must be a string');
+        try {
+            // A timeout marks the client disconnected, and only a command makes it reconnect.
+            $this->established = $this->established || $this->redis->isConnected();
+            if (!$this->established) {
+                throw new CacheException('Redis connection is not established');
             }
 
-            $this->validateKey($key);
+            $this->assertClientConfiguration();
+
+            return true;
+        } catch (RedisException | CacheException $exception) {
+            return $this->fail('Redis ' . $operation . ' operation failed: ' . $exception->getMessage(), $exception);
         }
     }
 
-    private function calculateTtlSeconds(null|int|DateInterval $ttl): ?int
+    private function assertClientConfiguration(): void
     {
-        if ($ttl === null) {
-            return null;
+        $prefix = $this->redis->getOption(Redis::OPT_PREFIX);
+
+        if ($prefix !== false && $prefix !== null && $prefix !== '') {
+            throw new InvalidArgumentException('Use the adapter prefix instead of Redis::OPT_PREFIX');
         }
 
-        if ($ttl instanceof DateInterval) {
-            $now = new \DateTimeImmutable();
-            $expiresAt = $now->add($ttl);
-            return $expiresAt->getTimestamp() - time();
+        if ($this->redis->getOption(Redis::OPT_SERIALIZER) !== Redis::SERIALIZER_NONE) {
+            throw new InvalidArgumentException('Redis::OPT_SERIALIZER must be Redis::SERIALIZER_NONE');
         }
 
-        return $ttl;
+        if ($this->redis->getOption(Redis::OPT_COMPRESSION) !== Redis::COMPRESSION_NONE) {
+            throw new InvalidArgumentException('Redis::OPT_COMPRESSION must be Redis::COMPRESSION_NONE');
+        }
+
+        if ($this->redis->getMode() !== Redis::ATOMIC) {
+            throw new InvalidArgumentException('Redis cache requires a client outside transactions and pipelines');
+        }
+    }
+
+    private function requireWriteSuccess(mixed $result): true
+    {
+        if ($result !== true && $result !== 'OK') {
+            throw new CacheException('Redis write returned an unsuccessful response');
+        }
+
+        return true;
+    }
+
+    private function requireDeleteSuccess(mixed $result): true
+    {
+        if (!is_int($result) || $result < 0) {
+            throw new CacheException('Redis delete returned an unsuccessful response');
+        }
+
+        return true;
+    }
+
+    private function checkLastError(): void
+    {
+        $error = $this->redis->getLastError();
+
+        if ($error !== null) {
+            throw new CacheException($error);
+        }
     }
 }
