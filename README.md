@@ -48,6 +48,7 @@ Both adapters implement `Psr\SimpleCache\CacheInterface`, so application code ty
 - [API Reference](https://solophp.github.io/Cache/guide/api)
 - [Behavior in Detail](https://solophp.github.io/Cache/guide/details)
 - [Upgrading from 1.x](UPGRADE.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
