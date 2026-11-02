@@ -15,8 +15,11 @@ use Solo\Cache\Internal\Ttl;
 
 class RedisAdapter extends AbstractAdapter
 {
-    /** About 285,000 years: far below the point where Redis rejects an expiration as overflowing. */
-    private const int MAX_TTL = 9_000_000_000_000;
+    /**
+     * About 285,000 years: far below the point where Redis rejects an expiration as overflowing.
+     * A 32-bit build cannot express it, and every TTL it can express is already shorter.
+     */
+    private const int MAX_TTL = PHP_INT_SIZE === 8 ? 9_000_000_000_000 : PHP_INT_MAX;
 
     private readonly string $prefix;
 
@@ -69,6 +72,10 @@ class RedisAdapter extends AbstractAdapter
 
         if ($seconds !== null && $seconds <= 0) {
             return $this->delete($key);
+        }
+
+        if (!$this->ready('set')) {
+            return false;
         }
 
         $serialized = $this->encode($value);
@@ -177,6 +184,10 @@ class RedisAdapter extends AbstractAdapter
             return $this->deleteMultiple(array_map(strval(...), array_keys($values)));
         }
 
+        if (!$this->ready('setMultiple')) {
+            return false;
+        }
+
         $serialized = [];
         foreach ($values as $key => $value) {
             $payload = $this->encode($value);
@@ -258,14 +269,11 @@ class RedisAdapter extends AbstractAdapter
      */
     private function run(string $operation, callable $callback, mixed $fallback): mixed
     {
-        try {
-            // A timeout marks the client disconnected, and only a command makes it reconnect.
-            $this->established = $this->established || $this->redis->isConnected();
-            if (!$this->established) {
-                throw new CacheException('Redis connection is not established');
-            }
+        if (!$this->ready($operation)) {
+            return $fallback;
+        }
 
-            $this->assertClientConfiguration();
+        try {
             $this->redis->clearLastError();
             $result = $callback();
             $this->checkLastError();
@@ -275,6 +283,27 @@ class RedisAdapter extends AbstractAdapter
             $this->fail('Redis ' . $operation . ' operation failed: ' . $exception->getMessage(), $exception);
 
             return $fallback;
+        }
+    }
+
+    /**
+     * Whether the client can take commands; a storage failure follows the error mode. Writes call
+     * it before serializing too, because value hooks may use the same client.
+     */
+    private function ready(string $operation): bool
+    {
+        try {
+            // A timeout marks the client disconnected, and only a command makes it reconnect.
+            $this->established = $this->established || $this->redis->isConnected();
+            if (!$this->established) {
+                throw new CacheException('Redis connection is not established');
+            }
+
+            $this->assertClientConfiguration();
+
+            return true;
+        } catch (RedisException | CacheException $exception) {
+            return $this->fail('Redis ' . $operation . ' operation failed: ' . $exception->getMessage(), $exception);
         }
     }
 

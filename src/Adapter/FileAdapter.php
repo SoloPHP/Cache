@@ -6,6 +6,7 @@ namespace Solo\Cache\Adapter;
 
 use DateInterval;
 use DirectoryIterator;
+use Random\RandomException;
 use Solo\Cache\Exception\CacheException;
 use Solo\Cache\Internal\Key;
 use Solo\Cache\Internal\PhpSerializer;
@@ -46,18 +47,26 @@ class FileAdapter extends AbstractAdapter
     public function get(string $key, mixed $default = null): mixed
     {
         Key::validate($key);
-        $content = $this->read($this->path($key));
-        if (!is_string($content)) {
+        $handle = $this->open($this->path($key));
+        if (!is_resource($handle)) {
             return $default;
         }
 
-        // The header is checked first, so an expired or truncated entry is never restored.
-        $entry = $this->header($content, strlen($content));
-        if ($entry === null || $this->isExpired($entry['expires'])) {
-            return $default;
+        try {
+            // The header comes first, so an expired or truncated entry is neither read nor restored.
+            $header = $this->header($handle);
+            if ($header === null || $this->isExpired($header['expires'])) {
+                return $default;
+            }
+
+            $payload = stream_get_contents($handle);
+        } finally {
+            fclose($handle);
         }
 
-        return PhpSerializer::decode(substr($content, $entry['offset']), $default);
+        return is_string($payload) && strlen($payload) === $header['length']
+            ? PhpSerializer::decode($payload, $default)
+            : $default;
     }
 
     public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
@@ -79,7 +88,11 @@ class FileAdapter extends AbstractAdapter
 
         return $this->withLock(function () use ($key, $content): bool {
             // A temporary file in the pool directory keeps rename() atomic; 'x' never reuses one.
-            $temporary = $this->cacheDirectory . '/.solo-cache-' . bin2hex(random_bytes(8)) . '.tmp';
+            try {
+                $temporary = $this->cacheDirectory . '/.solo-cache-' . bin2hex(random_bytes(8)) . '.tmp';
+            } catch (RandomException $exception) {
+                return $this->fail('Failed to name a temporary cache file', $exception);
+            }
             $handle = @fopen($temporary, 'xb');
             if ($handle === false) {
                 return $this->fail('Failed to create a temporary cache file: ' . $temporary);
@@ -167,19 +180,19 @@ class FileAdapter extends AbstractAdapter
         return $this->cacheDirectory . '/solo-' . hash('sha256', $key) . '.cache';
     }
 
-    /** @param int<0, max>|null $length */
-    private function read(string $path, ?int $length = null): string|false|null
+    /** @return resource|false|null The open entry, false after a failure in ErrorMode::Fail, or null if missing. */
+    private function open(string $path): mixed
     {
-        $content = @file_get_contents($path, false, null, 0, $length);
-        if ($content !== false) {
-            return $content;
+        $handle = @fopen($path, 'rb');
+        if ($handle !== false) {
+            return $handle;
         }
 
         if ($this->exists($path)) {
             // A writer may have published the file after the first open missed.
-            $content = @file_get_contents($path, false, null, 0, $length);
-            if ($content !== false) {
-                return $content;
+            $handle = @fopen($path, 'rb');
+            if ($handle !== false) {
+                return $handle;
             }
             if ($this->exists($path)) {
                 return $this->fail('Failed to read cache file: ' . $path);
@@ -198,20 +211,26 @@ class FileAdapter extends AbstractAdapter
     }
 
     /**
-     * Parses the "<expiry> <length>\n" header that precedes the serialized value. An expiry
-     * of 0 means none, and the length must match the rest of the entry.
+     * Reads the "<expiry> <length>\n" line that precedes the serialized value, leaving the handle
+     * at the value. An expiry of 0 means none, and the length must match the rest of the file.
      *
-     * @return array{expires: int, offset: int}|null
+     * @param resource $handle
+     * @return array{expires: int, length: int}|null
      */
-    private function header(string $content, int $size): ?array
+    private function header($handle): ?array
     {
-        if (preg_match('/\A(\d{1,19}) (\d{1,19})\n/', $content, $match) !== 1) {
+        $line = @fgets($handle, self::HEADER_MAX + 1);
+        $stat = fstat($handle);
+        if (
+            $line === false
+            || $stat === false
+            || preg_match('/\A(\d{1,19}) (\d{1,19})\n\z/', $line, $match) !== 1
+            || (int) $match[2] !== $stat['size'] - strlen($line)
+        ) {
             return null;
         }
 
-        $offset = strlen($match[0]);
-
-        return (int) $match[2] === $size - $offset ? ['expires' => (int) $match[1], 'offset' => $offset] : null;
+        return ['expires' => (int) $match[1], 'length' => (int) $match[2]];
     }
 
     /**
@@ -221,15 +240,18 @@ class FileAdapter extends AbstractAdapter
      */
     private function stale(string $path): bool
     {
-        $head = $this->read($path, self::HEADER_MAX);
-        if (!is_string($head)) {
+        $handle = $this->open($path);
+        if (!is_resource($handle)) {
             return false;
         }
 
-        clearstatcache(true, $path);
-        $entry = $this->header($head, (int) @filesize($path));
+        try {
+            $header = $this->header($handle);
+        } finally {
+            fclose($handle);
+        }
 
-        return $entry === null || $this->isExpired($entry['expires']);
+        return $header === null || $this->isExpired($header['expires']);
     }
 
     private function isExpired(int $expires): bool

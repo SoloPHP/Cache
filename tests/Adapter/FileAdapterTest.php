@@ -141,6 +141,19 @@ final class FileAdapterTest extends TestCase
         self::assertFileExists($this->lockPath());
     }
 
+    public function testLockFileIsMadePrivateBeforeLocking(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('POSIX permissions are required');
+        }
+
+        touch($this->lockPath());
+        chmod($this->lockPath(), 0644);
+        self::assertTrue($this->cache->set('key', 'value'));
+        clearstatcache(true, $this->lockPath());
+        self::assertSame(0600, fileperms($this->lockPath()) & 0777);
+    }
+
     public function testMissingPoolDirectoryUsesTheConfiguredReadErrorMode(): void
     {
         rmdir($this->directory);

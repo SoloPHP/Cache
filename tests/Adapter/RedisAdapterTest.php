@@ -172,12 +172,41 @@ final class RedisAdapterTest extends TestCase
     public function testInterruptedPipelineIsDiscarded(): void
     {
         $redis = $this->createMock(Redis::class);
-        // Constructor and run() see an atomic client; the cleanup sees the abandoned pipeline.
-        $this->configureClient($redis, [Redis::ATOMIC, Redis::ATOMIC, Redis::PIPELINE]);
+        // Construction and both readiness checks see an atomic client; the cleanup sees the open pipeline.
+        $this->configureClient($redis, [Redis::ATOMIC, Redis::ATOMIC, Redis::ATOMIC, Redis::PIPELINE]);
         $redis->method('exec')->willThrowException(new RedisException('read error on connection'));
         $redis->expects(self::once())->method('discard')->willReturn(true);
 
         self::assertFalse((new RedisAdapter($redis, ErrorMode::Fail))->setMultiple(['a' => 1], 30));
+    }
+
+    public function testUnserializableValueReachesNoRedisCommand(): void
+    {
+        $redis = $this->createMock(Redis::class);
+        $this->configureClient($redis);
+        foreach (['set', 'setex', 'mSet', 'pipeline'] as $method) {
+            $redis->expects(self::never())->method($method);
+        }
+        $adapter = new RedisAdapter($redis, ErrorMode::Fail);
+        $closure = static fn (): int => 1;
+
+        self::assertFalse($adapter->set('a', $closure));
+        self::assertFalse($adapter->setMultiple(['a' => 1, 'b' => $closure], 30));
+        $adapter->setMode(ErrorMode::Throw);
+        $this->expectException(CacheException::class);
+        $adapter->setMultiple(['a' => 1, 'b' => $closure]);
+    }
+
+    public function testClientInATransactionIsRejectedBeforeTheValueIsSerialized(): void
+    {
+        $redis = $this->createStub(Redis::class);
+        $this->configureClient($redis, [Redis::ATOMIC, Redis::MULTI]);
+        $adapter = new RedisAdapter($redis);
+
+        // Serializing an anonymous object would fail with CacheException instead.
+        $this->expectException(InvalidArgumentException::class);
+        $adapter->set('a', new class {
+        });
     }
 
     /** @return iterable<string, array{string, Closure, mixed}> */

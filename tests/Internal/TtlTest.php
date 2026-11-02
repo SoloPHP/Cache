@@ -6,6 +6,7 @@ namespace Solo\Cache\Tests\Internal;
 
 use DateInterval;
 use PHPUnit\Framework\TestCase;
+use Solo\Cache\Exception\InvalidArgumentException;
 use Solo\Cache\Internal\Ttl;
 
 class TtlTest extends TestCase
@@ -21,6 +22,18 @@ class TtlTest extends TestCase
     {
         self::assertSame(3600, Ttl::seconds(new DateInterval('PT1H')));
         self::assertSame(0, Ttl::seconds(new DateInterval('PT0S')));
+    }
+
+    public function testIntervalPhpCannotApplyIsRejected(): void
+    {
+        $uninitialized = new class extends DateInterval {
+            public function __construct()
+            {
+            }
+        };
+
+        $this->expectException(InvalidArgumentException::class);
+        Ttl::seconds($uninitialized);
     }
 
     public function testInvertedIntervalIsNegative(): void
