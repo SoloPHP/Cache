@@ -6,17 +6,18 @@ namespace Solo\Cache\Tests;
 
 use DateInterval;
 use PHPUnit\Framework\TestCase;
-use Solo\Cache\Adapter\CacheAdapterInterface;
+use Psr\SimpleCache\CacheInterface;
 use Solo\Cache\Cache;
 
 class CacheTest extends TestCase
 {
-    private CacheAdapterInterface $adapter;
+    private CacheInterface $adapter;
     private Cache $cache;
 
+    #[\Override]
     protected function setUp(): void
     {
-        $this->adapter = $this->createMock(CacheAdapterInterface::class);
+        $this->adapter = $this->createMock(CacheInterface::class);
         $this->cache = new Cache($this->adapter);
     }
 

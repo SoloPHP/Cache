@@ -6,12 +6,11 @@ namespace Solo\Cache;
 
 use DateInterval;
 use Psr\SimpleCache\CacheInterface;
-use Solo\Cache\Adapter\CacheAdapterInterface;
 
-class Cache implements CacheInterface
+readonly class Cache implements CacheInterface
 {
     public function __construct(
-        private readonly CacheAdapterInterface $adapter
+        private CacheInterface $adapter
     ) {
     }
 

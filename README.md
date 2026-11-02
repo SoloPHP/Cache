@@ -1,21 +1,10 @@
-# PSR-16 Cache Library
+# Solo Cache
 
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
-[![License](https://img.shields.io/packagist/l/solophp/cache.svg)](https://github.com/solophp/cache/blob/main/LICENSE)
-[![PHP Version](https://img.shields.io/packagist/php-v/solophp/cache.svg)](https://packagist.org/packages/solophp/cache)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)]()
+[![PHP Version](https://img.shields.io/badge/PHP-8.3%2B-8892BF.svg)](https://php.net/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A flexible, PSR-16 compliant cache library with pluggable adapters for PHP 8.1+.
-
-## Features
-
-- Full PSR-16 (Simple Cache) compliance
-- Pluggable adapter architecture
-- File-based cache adapter
-- Redis cache adapter
-- Thread-safe file operations with `LOCK_EX`
-- Automatic expiration handling
-- Support for TTL as integer seconds or DateInterval
+PSR-16 cache for PHP with file and Redis adapters. File writes publish atomically through a temporary file and `rename()`; a Redis pool lives under its own key prefix and sends each batch in one round trip. Values keep their types, so a cached `false` or `null` is a hit, and `ErrorMode` decides whether a failing backend throws or turns into a miss.
 
 ## Installation
 
@@ -23,210 +12,43 @@ A flexible, PSR-16 compliant cache library with pluggable adapters for PHP 8.1+.
 composer require solophp/cache
 ```
 
-For Redis support, ensure you have the Redis PHP extension installed:
+Requires PHP 8.3+. The Redis adapter also needs the `redis` extension.
 
-```bash
-pecl install redis
-```
-
-## Usage
-
-### File Cache
+## Example
 
 ```php
-<?php
-
-use Solo\Cache\Cache;
 use Solo\Cache\Adapter\FileAdapter;
-
-// Create file adapter
-$adapter = new FileAdapter('/path/to/cache/directory');
-
-// Create cache instance
-$cache = new Cache($adapter);
-
-// Store a value
-$cache->set('user.123', ['name' => 'John', 'email' => 'john@example.com'], 3600);
-
-// Retrieve a value
-$user = $cache->get('user.123');
-
-// Check if key exists
-if ($cache->has('user.123')) {
-    echo "Cache hit!";
-}
-
-// Delete a key
-$cache->delete('user.123');
-
-// Clear all cache
-$cache->clear();
-```
-
-### Redis Cache
-
-```php
-<?php
-
-use Solo\Cache\Cache;
 use Solo\Cache\Adapter\RedisAdapter;
-use Redis;
 
-// Create Redis connection
+$cache = new FileAdapter(__DIR__ . '/var/cache/catalog');
+$cache->set('product.42', ['name' => 'Desk'], 3600);
+$product = $cache->get('product.42'); // ['name' => 'Desk']
+
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 
-// Create Redis adapter (default MODE_THROW, prefix "cache:")
-$adapter = new RedisAdapter($redis);
-
-// Or with custom prefix and graceful error handling
-$adapter = new RedisAdapter($redis, RedisAdapter::MODE_FAIL, 'myapp:');
-
-// Create cache instance
-$cache = new Cache($adapter);
-
-// Use the cache
-$cache->set('session.abc123', ['user_id' => 42], 7200);
-$session = $cache->get('session.abc123');
-
-// Switch error mode at runtime if needed
-$adapter->setMode(RedisAdapter::MODE_FAIL);
+$cache = new RedisAdapter($redis, prefix: 'catalog:');
+$cache->setMultiple(['product.42' => 'Desk', 'product.43' => 'Chair'], 600);
+$cache->getMultiple(['product.42', 'product.44'], 'missing');
+// ['product.42' => 'Desk', 'product.44' => 'missing']
 ```
 
-### Multiple Operations
+Both adapters implement `Psr\SimpleCache\CacheInterface`, so application code type-hints the interface and the adapter is chosen where services are wired. Keys use ASCII letters, digits, `_`, `.` and `-`. Reads never delete files, so schedule `FileAdapter::gc()` to reclaim the space of expired entries.
 
-```php
-<?php
+## Documentation
 
-// Set multiple values
-$cache->setMultiple([
-    'key1' => 'value1',
-    'key2' => 'value2',
-    'key3' => 'value3',
-], 3600);
+**[Full Documentation](https://solophp.github.io/Cache/)**
 
-// Get multiple values
-$values = $cache->getMultiple(['key1', 'key2', 'key3'], 'default');
-
-// Delete multiple values
-$cache->deleteMultiple(['key1', 'key2']);
-```
-
-### Using DateInterval for TTL
-
-```php
-<?php
-
-use DateInterval;
-
-// Cache for 1 hour
-$cache->set('key', 'value', new DateInterval('PT1H'));
-
-// Cache for 1 day
-$cache->set('key', 'value', new DateInterval('P1D'));
-
-// Cache for 30 days
-$cache->set('key', 'value', new DateInterval('P30D'));
-```
-
-## Adapters
-
-### FileAdapter
-
-File-based cache implementation suitable for low to medium load applications.
-
-**Constructor Parameters:**
-- `$cacheDirectory` (string): Directory path for storing cache files
-- `$mode` (int): Error handling mode (optional, default: MODE_THROW)
-
-**Features:**
-- **Two error handling modes:**
-  - `FileAdapter::MODE_THROW` - Throws exceptions on errors (default)
-  - `FileAdapter::MODE_FAIL` - Returns false/default on errors (graceful degradation)
-- **Optimized batch operations:**
-  - Automatic deduplication of keys in batch operations
-  - Early return for empty arrays
-  - Graceful error handling in batch operations
-- **Garbage collection method** `gc()` for manual cleanup of expired files
-- **Refactored cache loading** with centralized `loadCacheData()` method
-- Automatic directory creation with 0755 permissions
-- Thread-safe operations with file locking (LOCK_EX)
-- Automatic cleanup of expired entries on read operations
-- Uses MD5 hashing for file names
-- Runtime mode switching with `setMode()` method
-
-**Usage with error modes:**
-```php
-// Default mode - throws exceptions
-$adapter = new FileAdapter('/path/to/cache');
-
-// Graceful mode - returns defaults on errors
-$adapter = new FileAdapter('/path/to/cache', FileAdapter::MODE_FAIL);
-
-// Manual garbage collection
-$deletedFiles = $adapter->gc(); // Returns number of deleted expired files
-```
-
-**Limitations:**
-- Not suitable for high-performance or distributed systems
-- Consider Redis or Memcached for high-load scenarios
-
-### RedisAdapter
-
-Redis-based cache implementation for high-performance and distributed applications.
-
-**Constructor Parameters:**
-- `$redis` (Redis): Connected Redis instance
-- `$mode` (int): Error handling mode (optional, default: MODE_THROW)
-- `$prefix` (string): Key prefix for namespace isolation (optional, default: `cache:`)
-
-**Features:**
-- **Optimized batch operations using Redis native commands** (mGet, mSet, del)
-  - `getMultiple()` uses single mGet call instead of N individual gets
-  - `setMultiple()` uses atomic mSet when no TTL is specified
-  - `deleteMultiple()` uses single del call with array of keys
-- **Manual serialization** — correctly handles all PHP types including `false`
-- **Production-safe `clear()`** — uses SCAN instead of KEYS to avoid blocking Redis
-- **Two error handling modes:**
-  - `RedisAdapter::MODE_THROW` - Throws exceptions on errors (default)
-  - `RedisAdapter::MODE_FAIL` - Returns false/default on errors (graceful degradation)
-- **Automatic deduplication** of keys in batch operations
-- **Configurable key prefix** for multi-app namespace isolation
-- Native Redis TTL support
-- Runtime mode switching with `setMode()` method
-- Suitable for distributed systems
-
-## Key Validation
-
-Both adapters enforce PSR-16 key requirements:
-- Keys cannot be empty
-- Only alphanumeric characters, underscores, dots, colons, and hyphens are allowed
-- Pattern: `/^[a-zA-Z0-9_.:-]+$/`
-- Colons (`:`) are supported as the standard separator for cache keys (Redis, Memcached conventions)
-- Hyphens (`-`) are supported for UUID keys
-
-Example keys:
-- `user:123:profile`
-- `cache:session:abc123`
-- `app.config.database`
-- `550e8400-e29b-41d4-a716-446655440000`
-
-Invalid keys will throw `Solo\Cache\Exception\InvalidArgumentException`.
-
-## Exceptions
-
-The library provides PSR-16 compliant exceptions:
-
-- `Solo\Cache\Exception\InvalidArgumentException` - Invalid cache keys or arguments
-- `Solo\Cache\Exception\CacheException` - Cache operation failures
-
-## Requirements
-
-- PHP 8.1 or higher
-- psr/simple-cache ^3.0
-- ext-redis (for Redis adapter)
+- [Getting Started](https://solophp.github.io/Cache/guide/)
+- [File Cache](https://solophp.github.io/Cache/guide/#file-cache)
+- [Redis Cache](https://solophp.github.io/Cache/guide/#redis-cache)
+- [Expiration](https://solophp.github.io/Cache/guide/#set-expiration)
+- [Batches](https://solophp.github.io/Cache/guide/#work-in-batches)
+- [Failure Modes](https://solophp.github.io/Cache/guide/#choose-a-failure-mode)
+- [API Reference](https://solophp.github.io/Cache/guide/api)
+- [Behavior in Detail](https://solophp.github.io/Cache/guide/details)
+- [Upgrading from 1.x](UPGRADE.md)
 
 ## License
 
-MIT
-
+MIT. See [LICENSE](LICENSE).

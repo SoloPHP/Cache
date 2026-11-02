@@ -3,8 +3,14 @@
 /.idea/
 /.vscode/
 /.phpunit.result.cache
+/.phpunit.cache/
 /phpunit.xml
 .DS_Store
 /tests/cache/
 /cache/
 *.cache
+
+# Documentation
+/docs/node_modules/
+/docs/.vitepress/cache/
+/docs/.vitepress/dist/

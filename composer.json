@@ -21,7 +21,7 @@
     }
   ],
   "require": {
-    "php": "^8.1",
+    "php": "^8.3",
     "psr/simple-cache": "^3.0"
   },
   "require-dev": {
@@ -44,9 +44,9 @@
   },
   "scripts": {
     "test": "phpunit",
-    "cs-check": "phpcs --standard=PSR12 src/",
-    "cs-fix": "phpcbf --standard=PSR12 src/",
-    "analyze": "phpstan analyse src --level=max",
+    "cs-check": "phpcs",
+    "cs-fix": "phpcbf",
+    "analyze": "phpstan analyse --memory-limit=512M",
     "check": [
       "@cs-check",
       "@analyze",
