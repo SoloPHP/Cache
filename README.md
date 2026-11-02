@@ -45,6 +45,7 @@ Both adapters implement `Psr\SimpleCache\CacheInterface`, so application code ty
 - [Expiration](https://solophp.github.io/Cache/guide/#set-expiration)
 - [Batches](https://solophp.github.io/Cache/guide/#work-in-batches)
 - [Failure Modes](https://solophp.github.io/Cache/guide/#choose-a-failure-mode)
+- [Application Wiring](https://solophp.github.io/Cache/guide/#wire-it-into-an-application)
 - [API Reference](https://solophp.github.io/Cache/guide/api)
 - [Behavior in Detail](https://solophp.github.io/Cache/guide/details)
 - [Upgrading from 1.x](UPGRADE.md)

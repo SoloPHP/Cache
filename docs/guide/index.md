@@ -159,6 +159,64 @@ final class ProductCatalog
 `Solo\Cache\Cache` is a thin readonly wrapper that forwards every call to any
 PSR-16 implementation, for code that wants a concrete class to depend on.
 
+## Wire it into an application
+
+Register the adapter once, as a shared service bound to `CacheInterface`. In an
+application built on [solophp/application](https://solophp.github.io/Application/),
+such as the [Skeleton](https://github.com/SoloPHP/Skeleton), that is a provider
+in `src/Providers/`:
+
+```php
+namespace App\Providers;
+
+use Psr\SimpleCache\CacheInterface;
+use Solo\Application\Config;
+use Solo\Cache\Adapter\ErrorMode;
+use Solo\Cache\Adapter\FileAdapter;
+use Solo\Contracts\Container\WritableContainerInterface;
+
+final class CacheServiceProvider
+{
+    public function register(WritableContainerInterface $container): void
+    {
+        $container->set(CacheInterface::class, fn (WritableContainerInterface $c) => new FileAdapter(
+            $c->get(Config::class)->basePath . '/storage/cache/app',
+            ErrorMode::Fail,
+        ));
+    }
+}
+```
+
+List `CacheServiceProvider::class` in `config/providers.php`. The container
+builds the adapter the first time a service asks for `CacheInterface`, and
+every service shares it. Keep the pool in a directory of its own: the
+Skeleton's `storage/cache/` also holds its route cache.
+
+For Redis, connect in the same factory:
+
+```php
+use Redis;
+use RedisException;
+use Solo\Cache\Adapter\RedisAdapter;
+use Solo\Dotenv\Dotenv;
+
+$container->set(CacheInterface::class, function (): CacheInterface {
+    $redis = new Redis();
+
+    try {
+        $redis->connect(Dotenv::string('REDIS_HOST', '127.0.0.1'), Dotenv::int('REDIS_PORT', 6379), 1.0);
+    } catch (RedisException) {
+        // With ErrorMode::Fail, an unreachable server becomes a series of misses.
+    }
+
+    return new RedisAdapter($redis, ErrorMode::Fail, Dotenv::string('CACHE_PREFIX', 'app:'));
+});
+```
+
+phpredis throws from `connect()` when the server cannot be reached. Catching it
+keeps an optional cache from failing the request; with `ErrorMode::Throw`, let
+the exception propagate instead.
+
 ## Clean up file caches
 
 Reads never delete anything, so expired and corrupt files stay on disk until
