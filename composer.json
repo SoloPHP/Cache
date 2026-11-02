@@ -1,7 +1,7 @@
 {
   "name": "solophp/cache",
   "type": "library",
-  "description": "PSR-16 compliant cache library with pluggable adapters",
+  "description": "PSR-16 cache for PHP with atomic file and Redis adapters, typed values and an explicit failure policy",
   "keywords": [
     "cache",
     "psr-16",

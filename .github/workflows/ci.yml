@@ -52,3 +52,16 @@ jobs:
           tools: composer:v2
       - run: composer update --prefer-dist --no-interaction --no-progress
       - run: composer test
+
+  i386:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+      - run: composer update --prefer-dist --no-interaction --no-progress
+      # 32-bit PHP has its own integer and timestamp limits.
+      - run: docker run --rm --platform linux/386 -v "$PWD":/app -w /app php:8.3-cli-alpine vendor/bin/phpunit
