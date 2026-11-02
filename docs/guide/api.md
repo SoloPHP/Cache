@@ -19,7 +19,7 @@ Both adapters implement every method of `Psr\SimpleCache\CacheInterface` with th
 
 - **Keys** are non-empty strings of ASCII letters, digits, `_`, `.` and `-`. Anything else, including a trailing newline, raises `InvalidArgumentException`. See [Keys](details.md#keys).
 - **Values** are stored with PHP serialization. A value that cannot be serialized without loss, such as a closure or a resource, is a storage failure. See [Values](details.md#values-and-serialization).
-- **TTL** is `null` for no expiration, an integer number of seconds or a `DateInterval`. A TTL of zero or less deletes the entry. An interval PHP cannot convert raises `InvalidArgumentException`.
+- **TTL** is `null` for no expiration, an integer number of seconds or a `DateInterval`. A TTL of zero or less deletes the entry. An interval too long to count saturates instead of overflowing. An interval PHP cannot apply raises `InvalidArgumentException`.
 - **Failures** follow the [error mode](#errormode). Invalid arguments and configuration throw in both modes.
 
 | Method | Returns |
@@ -140,5 +140,5 @@ Both classes implement the matching PSR-16 interface, so callers can catch `Psr\
 
 | Exception | Extends | Thrown when |
 |---|---|---|
-| `Exception\InvalidArgumentException` | `\InvalidArgumentException` | A key is invalid or not a string; a batch is given an invalid key; a `DateInterval` cannot be converted; a Redis prefix is empty; a Redis client is configured incompatibly or is inside a transaction or pipeline |
+| `Exception\InvalidArgumentException` | `\InvalidArgumentException` | A key is invalid or not a string; a batch is given an invalid key; a `DateInterval` cannot be applied; a Redis prefix is empty; a Redis client is configured incompatibly or is inside a transaction or pipeline |
 | `Exception\CacheException` | `\RuntimeException` | A storage operation fails in `ErrorMode::Throw`; a `FileAdapter` directory is unusable, in either mode; a `RedisAdapter` client is not connected at construction in `ErrorMode::Throw` |

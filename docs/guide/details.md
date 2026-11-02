@@ -60,7 +60,7 @@ Reading a payload that cannot be restored returns the default: corrupt bytes, a 
 |---|---|
 | `null` | The entry never expires |
 | A positive integer | The entry expires after that many seconds |
-| A `DateInterval` | Converted to seconds from the current time, so `P1M` is the length of the coming month |
+| A `DateInterval` | Converted to seconds from the current time, so `P1M` is the length of the coming month. An interval too long to count saturates to the longest TTL, or to an expired one if inverted |
 | Zero or less | The entry is deleted instead of stored; the value is not serialized |
 
 The file adapter stores the expiry as a Unix timestamp in the entry's header and treats the entry as expired once the current second reaches it, so expiration has a resolution of one second. Very long TTLs are capped: the file adapter at the largest timestamp PHP can hold, the Redis adapter at 9,000,000,000,000 seconds.
@@ -156,7 +156,7 @@ When a connection drops, for example after a read timeout, phpredis marks it clo
 
 ## Testing
 
-`composer check` runs the PSR-12 check on `src/` and `tests/`, PHPStan at its maximum level on `src/`, and PHPUnit. `.github/workflows/ci.yml` validates `composer.json` and runs the checks on PHP 8.3, 8.4 and 8.5 with a Redis 7.4 service for the integration tests, and runs the test suite once more on PHP 8.3 without the Redis extension. `.github/workflows/docs.yml` builds this site.
+`composer check` runs the PSR-12 check on `src/` and `tests/`, PHPStan at its maximum level on `src/`, and PHPUnit. `.github/workflows/ci.yml` validates `composer.json` and runs the checks on PHP 8.3, 8.4 and 8.5 with a Redis 7.4 service for the integration tests, and runs the test suite once more on PHP 8.3 without the Redis extension and once on 32-bit PHP 8.3. `.github/workflows/docs.yml` builds this site.
 
 To run the Redis integration tests locally, install `ext-redis` and set `REDIS_HOST` and `REDIS_PORT` to a disposable standalone server. The tests use their own random prefixes.
 

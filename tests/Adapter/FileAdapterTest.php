@@ -74,6 +74,12 @@ final class FileAdapterTest extends TestCase
         self::assertSame('value', $this->cache->get('long'));
     }
 
+    public function testIntervalOfABillionYearsStoresTheValue(): void
+    {
+        self::assertTrue($this->cache->set('eon', 'value', new DateInterval('P1000000000Y')));
+        self::assertSame('value', $this->cache->get('eon'));
+    }
+
     public function testEntryIsAHeaderFollowedByTheSerializedValue(): void
     {
         self::assertTrue($this->cache->set('plain', ['a' => false]));
