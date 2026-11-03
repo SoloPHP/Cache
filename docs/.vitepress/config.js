@@ -9,7 +9,6 @@ export default defineConfig({
 
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/Cache/logo.svg' }],
-    ['meta', { name: 'theme-color', content: '#ef4444' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:title', content: 'Solo Cache' }],
     ['meta', { property: 'og:description', content: description }],
